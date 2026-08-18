@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas Rubric Capture</title>
+  <style>
+    body { width: 330px; margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; color: #1f2937; }
+    h1 { margin: 0 0 8px; font-size: 17px; }
+    p { margin: 0 0 12px; color: #4b5563; }
+    button { width: 100%; border: 0; border-radius: 5px; padding: 9px 12px; background: #2563eb; color: white; font-weight: 600; cursor: pointer; }
+    button:focus-visible { outline: 3px solid #93c5fd; outline-offset: 2px; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #status { min-height: 20px; margin-top: 10px; font-size: 13px; }
+    #summary { margin-top: 10px; padding-top: 10px; border-top: 1px solid #d1d5db; font-size: 13px; }
+    #summary p { margin: 0 0 5px; color: inherit; }
+    .error { color: #b91c1c; }
+    .success, .complete { color: #047857; }
+    .warning { color: #92400e; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Canvas Rubric Capture</h1>
+  <p>Open a Canvas assignment or SpeedGrader page with its rubric expanded, then capture it.</p>
+  <button id="capture" type="button">Capture and import</button>
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
+  <section id="summary" aria-label="Privacy-safe capture summary" hidden>
+    <p id="capture-counts"></p>
+    <p id="completeness"></p>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>
