@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Canvas Rubric Capture",
-  "version": "1.4.0",
-  "description": "Capture and merge assignment directions and rubric data from the active Canvas assignment.",
+  "version": "1.5.0",
+  "description": "Capture Canvas assignment directions and rubric data into the course selected in the local application.",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": ["http://127.0.0.1:8787/*"],
   "action": {

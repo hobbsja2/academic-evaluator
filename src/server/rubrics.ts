@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { assignment13FixtureMetadata, assignment13Rubric } from "../fixtures/assignment-1-3-rubric.js";
 import type { NormalizedRubric } from "../shared/types.js";
+import { requireActiveCourseSelection } from "./courses.js";
 import { getDatabase, withTransaction } from "./db.js";
 import { HttpError } from "./errors.js";
 
@@ -27,6 +28,7 @@ const importSchema = z.object({
   assignmentId: z.union([z.string(), z.number()]).transform(String).nullable(),
   assignmentName: z.string().nullable(),
   assignmentDirections: directionsSchema.optional(),
+  selectedCourseToken: z.string().uuid(),
   rubricTitle: z.string().nullable(),
   criteria: z.array(criterionSchema).min(1),
   totalPoints: z.number().finite().nonnegative().nullable(),
@@ -40,12 +42,12 @@ const directionsImportSchema = z.object({
   assignmentId: z.union([z.string(), z.number()]).transform(String),
   assignmentName: z.string().nullable().optional(),
   assignmentDirections: z.string().trim().min(1).max(MAX_ASSIGNMENT_DIRECTIONS_LENGTH),
+  selectedCourseToken: z.string().uuid(),
   sourceUrl: z.url().nullable().optional(),
   capturedAt: z.iso.datetime().optional()
 });
 
 const router = Router();
-const latest = new Map<string, NormalizedRubric>();
 const pendingDirections = new Map<string, { directions: string; expiresAt: number }>();
 
 function normalizedDirections(value: string | null | undefined): string | null {
@@ -81,33 +83,26 @@ function normalize(input: z.infer<typeof importSchema>): NormalizedRubric {
   };
 }
 
-function memoryKey(rubric: NormalizedRubric): string {
-  return `${rubric.courseId ?? rubric.courseName ?? "unknown"}\0${rubric.assignmentId ?? rubric.assignmentName ?? "unknown"}`;
+function pendingDirectionsKey(localCourseId: string, assignmentId: string | null): string | null {
+  return assignmentId ? `${localCourseId}\0${assignmentId}` : null;
 }
 
-function pendingDirectionsKey(value: { courseId: string | null; assignmentId: string | null }): string | null {
-  return value.courseId && value.assignmentId ? `${value.courseId}\0${value.assignmentId}` : null;
-}
-
-async function persistRubric(rubric: NormalizedRubric): Promise<{ persisted: boolean; rubricId?: string; version?: number }> {
+async function persistRubric(
+  rubric: NormalizedRubric,
+  localCourseId: string
+): Promise<{ persisted: true; rubricId: string; version: number }> {
   try {
   const database = getDatabase();
-  if (!database || !rubric.assignmentName) return { persisted: false };
-  const uuid = z.string().uuid().safeParse(rubric.courseId);
-  const courses = uuid.success
-    ? (await database.query("SELECT id FROM courses WHERE id = $1", [uuid.data])).rows
-    : rubric.courseId
-      ? (await database.query("SELECT id FROM courses WHERE canvas_course_id = $1 LIMIT 2", [rubric.courseId])).rows
-      : rubric.courseName
-        ? (await database.query("SELECT id FROM courses WHERE code = $1 OR title = $1 LIMIT 2", [rubric.courseName])).rows
-        : [];
-  if (courses.length !== 1) return { persisted: false };
+  if (!database) throw new HttpError(503, "Database is not configured");
+  if (!rubric.assignmentName) throw new HttpError(400, "Assignment name is required to save a rubric");
+  const course = await database.query("SELECT id FROM courses WHERE id = $1", [localCourseId]);
+  if (!course.rows[0]) throw new HttpError(409, "The selected course no longer exists");
   return withTransaction(database, async (client) => {
     const assignments = await client.query(`INSERT INTO assignments (course_id, canvas_assignment_id, title)
       VALUES ($1, $2, $3)
       ON CONFLICT (course_id, title) DO UPDATE SET
         canvas_assignment_id = COALESCE(EXCLUDED.canvas_assignment_id, assignments.canvas_assignment_id),
-        title = EXCLUDED.title RETURNING id`, [courses[0].id, rubric.assignmentId, rubric.assignmentName]);
+        title = EXCLUDED.title RETURNING id`, [localCourseId, rubric.assignmentId, rubric.assignmentName]);
     const versions = await client.query(`SELECT COALESCE(MAX(version), 0)::int + 1 AS version
       FROM rubrics WHERE assignment_id = $1`, [assignments.rows[0].id]);
     const version = Number(versions.rows[0].version);
@@ -139,28 +134,43 @@ async function persistRubric(rubric: NormalizedRubric): Promise<{ persisted: boo
 
 router.post("/directions/import", (request, response) => {
   const body = directionsImportSchema.parse(request.body);
-  const key = pendingDirectionsKey({ courseId: body.courseId, assignmentId: body.assignmentId });
-  if (!key) throw new HttpError(400, "Canvas course and assignment IDs are required");
+  const course = requireActiveCourseSelection(body.selectedCourseToken);
+  const key = pendingDirectionsKey(course.id, body.assignmentId);
+  if (!key) throw new HttpError(400, "Canvas assignment ID is required");
   pendingDirections.set(key, {
     directions: body.assignmentDirections,
     expiresAt: Date.now() + PENDING_DIRECTIONS_TTL_MS
   });
-  response.status(201).json({ staged: true, expiresInMinutes: 30 });
+  response.status(201).json({
+    staged: true,
+    expiresInMinutes: 30,
+    course: { code: course.code, section: course.section, term: course.term }
+  });
 });
 
 router.post("/import", async (request, response) => {
   try {
     const parsed = importSchema.parse(request.body);
-    const key = pendingDirectionsKey(parsed);
+    const course = requireActiveCourseSelection(parsed.selectedCourseToken);
+    const key = pendingDirectionsKey(course.id, parsed.assignmentId);
     const pending = key ? pendingDirections.get(key) : undefined;
     if (key && pending && pending.expiresAt <= Date.now()) pendingDirections.delete(key);
     const stagedDirections = pending && pending.expiresAt > Date.now() ? pending.directions : undefined;
     const assignmentDirections = normalizedDirections(parsed.assignmentDirections) ?? stagedDirections ?? null;
-    const rubric = normalize({ ...parsed, assignmentDirections });
-    latest.set(memoryKey(rubric), rubric);
-    const persistence = await persistRubric(rubric);
+    const rubric = normalize({
+      ...parsed,
+      courseId: course.id,
+      courseName: `${course.code} · ${course.section}`,
+      assignmentDirections
+    });
+    const persistence = await persistRubric(rubric, course.id);
     if (key) pendingDirections.delete(key);
-    response.status(201).json({ rubric, directionsMerged: Boolean(stagedDirections), ...persistence });
+    response.status(201).json({
+      rubric,
+      directionsMerged: Boolean(stagedDirections),
+      course: { code: course.code, section: course.section, term: course.term },
+      ...persistence
+    });
   } catch (error) {
     throw error;
   }
@@ -187,18 +197,19 @@ router.patch("/:id/directions", async (request, response) => {
   }
 });
 
-router.get("/", async (_request, response) => {
+router.get("/", async (request, response) => {
   try {
+  const courseId = z.object({ courseId: z.string().uuid() }).parse(request.query).courseId;
   const database = getDatabase();
-  const memory = [...latest.values()];
-  if (!database) return response.json({ memory, persisted: [] });
+  if (!database) throw new HttpError(503, "Database is not configured");
   const rubrics = await database.query(`SELECT r.id, r.title AS "rubricTitle", r.version,
       r.total_points::float8 AS "totalPoints", r.assignment_directions AS "assignmentDirections",
       r.source, r.source_url AS "sourceUrl", r.captured_at::text AS "capturedAt",
       a.id AS "assignmentId", a.title AS "assignmentName", c.id AS "courseId",
       c.code AS "courseName"
     FROM rubrics r JOIN assignments a ON a.id = r.assignment_id
-    JOIN courses c ON c.id = a.course_id ORDER BY r.created_at DESC`);
+    JOIN courses c ON c.id = a.course_id
+    WHERE c.id = $1 ORDER BY r.created_at DESC`, [courseId]);
   const persisted = [];
   for (const row of rubrics.rows) {
     const criteria = await database.query(`SELECT id, source_id AS "sourceId", name, description,
@@ -212,7 +223,7 @@ router.get("/", async (_request, response) => {
     }
     persisted.push({ ...row, criteria: normalizedCriteria });
   }
-  response.json({ memory, persisted });
+  response.json({ memory: [], persisted });
   } catch (error) {
     throw error;
   }

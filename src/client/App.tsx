@@ -9,6 +9,7 @@ type Health = {
 };
 type StoredRubric = NormalizedRubric & { id?: string; version?: number };
 type RubricList = { memory: NormalizedRubric[]; persisted: StoredRubric[] };
+type ActiveCourseSelection = Pick<Course, "id" | "code" | "section" | "title" | "term"> & { token: string };
 type Validation = { valid: boolean; rowCount: number; columnCount: number; headers: string[]; stableIdHeader: string };
 type CrosswalkMapping = { identityLabel: string; pseudonym: string };
 type Notice = { kind: "success" | "error" | "info"; text: string } | null;
@@ -74,6 +75,7 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
   const [courseId, setCourseId] = useState("");
+  const [extensionCourseId, setExtensionCourseId] = useState("");
   const [courseForm, setCourseForm] = useState<CourseForm>(emptyCourse);
   const [extendedEndDate, setExtendedEndDate] = useState("");
   const [rubrics, setRubrics] = useState<StoredRubric[]>([]);
@@ -106,16 +108,16 @@ export default function App() {
   } : null, [submissionText]);
 
   useEffect(() => {
-    void Promise.allSettled([
-      api<Health>("/api/health").then(setHealth),
-      api<{ courses: Course[] }>("/api/courses").then(({ courses: values }) => {
-        setCourses(values); setCourseId((current) => current || values[0]?.id || "");
-      }),
-      api<RubricList>("/api/rubrics").then(({ memory, persisted }) => setRubrics([...persisted, ...memory])),
-    ]).then((settled) => {
-      const rejected = settled.find((item) => item.status === "rejected");
-      if (rejected?.status === "rejected") setNotice({ kind: "info", text: rejected.reason instanceof Error ? rejected.reason.message : "Some data could not be loaded." });
-    });
+    void api<Health>("/api/health").then(setHealth).catch((error) => showError(error));
+    void (async () => {
+      try {
+        const { courses: values } = await api<{ courses: Course[] }>("/api/courses");
+        setCourses(values);
+        await activateCourse(values[0]?.id || "", false);
+      } catch (error) {
+        showError(error);
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -135,6 +137,63 @@ export default function App() {
     setNotice({ kind: "error", text: error instanceof Error ? error.message : "Unexpected error" });
   }
 
+  async function loadCourseRubrics(targetCourseId: string) {
+    try {
+      const params = new URLSearchParams({ courseId: targetCourseId });
+      const { memory, persisted } = await api<RubricList>(`/api/rubrics?${params}`);
+      setRubrics([...persisted, ...memory]);
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async function activateCourse(targetCourseId: string, announce = true) {
+    setCourseId(targetCourseId);
+    setExtensionCourseId("");
+    setRubrics([]);
+    setRubricIndex("");
+    setAssignmentDirections("");
+    setResults([]);
+    setHistory([]);
+    setPseudonym("");
+    if (announce) setBusy("course-selection");
+    try {
+      if (!targetCourseId) {
+        await api<void>("/api/courses/active", { method: "DELETE" });
+        if (announce) setNotice({ kind: "info", text: "No active course. Canvas imports are disabled until a course is selected." });
+        return;
+      }
+      const selection = await api<{ activeCourse: ActiveCourseSelection }>(
+        "/api/courses/active", jsonInit("PUT", { courseId: targetCourseId }));
+      setExtensionCourseId(selection.activeCourse.id);
+      await loadCourseRubrics(targetCourseId);
+      if (announce) {
+        setNotice({
+          kind: "success",
+          text: `${selection.activeCourse.code} section ${selection.activeCourse.section} is now the Canvas extension import target.`
+        });
+      }
+    } catch (error) {
+      setRubrics([]);
+      showError(error);
+    } finally {
+      if (announce) setBusy("");
+    }
+  }
+
+  async function refreshCourseRubrics() {
+    if (!courseId) return;
+    setBusy("rubrics");
+    try {
+      const selection = await api<{ activeCourse: ActiveCourseSelection }>(
+        "/api/courses/active", jsonInit("PUT", { courseId }));
+      setExtensionCourseId(selection.activeCourse.id);
+      await loadCourseRubrics(courseId);
+      setRubricIndex("");
+      setNotice({ kind: "success", text: "Rubrics refreshed and this course reactivated for Canvas imports." });
+    } catch (error) { showError(error); } finally { setBusy(""); }
+  }
+
   async function createCourse(event: FormEvent) {
     event.preventDefault(); setBusy("course"); setNotice(null);
     try {
@@ -144,8 +203,10 @@ export default function App() {
         canvasCourseId: courseForm.canvasCourseId || null,
         canvasUrl: courseForm.canvasUrl || null,
       }));
-      setCourses((current) => [created, ...current]); setCourseId(created.id); setCourseForm(emptyCourse);
-      setNotice({ kind: "success", text: `${created.code} section ${created.section} created.` });
+      setCourses((current) => [created, ...current]);
+      setCourseForm(emptyCourse);
+      await activateCourse(created.id, false);
+      setNotice({ kind: "success", text: `${created.code} section ${created.section} created and selected for Canvas imports.` });
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
   async function deleteCourse(course: Course) {
@@ -155,7 +216,8 @@ export default function App() {
     try {
       await api<void>(`/api/courses/${course.id}`, { method: "DELETE" });
       const remaining = courses.filter((item) => item.id !== course.id);
-      setCourses(remaining); setCourseId(remaining[0]?.id || "");
+      setCourses(remaining);
+      await activateCourse(remaining[0]?.id || "", false);
       setNotice({ kind: "success", text: "Course deleted." });
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
@@ -332,12 +394,13 @@ export default function App() {
           <div className="two-column">
             <div>
               <label htmlFor="course-select">Active course</label>
-              <select id="course-select" value={courseId} onChange={(event) => setCourseId(event.target.value)}>
+              <select id="course-select" value={courseId} disabled={busy === "course-selection"} onChange={(event) => void activateCourse(event.target.value)}>
                 <option value="">No course selected</option>
                 {courses.map((course) => <option key={course.id} value={course.id}>{course.code} · {course.section} · {course.term}</option>)}
               </select>
               {selectedCourse && <div className="course-card">
                 <div><strong>{selectedCourse.title || selectedCourse.code}</strong><span>{selectedCourse.code} · Section {selectedCourse.section}</span></div>
+                <p className="scoring-note"><strong>Canvas extension target:</strong> {extensionCourseId === selectedCourse.id ? "Active. New captures will be saved only to this course." : "Activating this course…"}</p>
                 <dl><div><dt>Term</dt><dd>{selectedCourse.term}</dd></div><div><dt>Dates</dt><dd>{formatDate(selectedCourse.startDate)}–{formatDate(selectedCourse.endDate)}</dd></div><div><dt>Automatic purge</dt><dd>{formatDate(selectedCourse.purgeAfter)}</dd></div></dl>
                 <p className="warning-text">Course-related student and grading data is scheduled for purge after this date.</p>
                 <div className="retention-editor">
@@ -413,7 +476,10 @@ export default function App() {
                 <option value="">Choose a rubric</option>
                 {rubrics.map((rubric, index) => <option key={`${rubric.id || rubric.assignmentId || "rubric"}-${index}`} value={index}>{labelForRubric(rubric)}{rubric.id ? ` · v${rubric.version ?? "?"}` : " · in memory"}</option>)}
               </select>
-              <button type="button" className="secondary" disabled={busy === "fixture"} onClick={() => void loadFixture()}>Load Assignment 1.3 fixture</button>
+              <div className="button-row">
+                <button type="button" className="secondary" disabled={!courseId || busy === "rubrics" || busy === "course-selection"} onClick={() => void refreshCourseRubrics()}>{busy === "rubrics" ? "Refreshing…" : "Refresh course rubrics"}</button>
+                <button type="button" className="secondary" disabled={!courseId || busy === "fixture"} onClick={() => void loadFixture()}>Load Assignment 1.3 fixture</button>
+              </div>
               {selectedRubric && <>
                 <div className="rubric-summary"><strong>{labelForRubric(selectedRubric)}</strong><span>{selectedRubric.criteria.length} criteria · {selectedRubric.totalPoints ?? "—"} points</span>{selectedRubric.source === "fixture" && <p className="warning-text"><strong>Fixture warning:</strong> Rating descriptors are incomplete. Use for demonstrations only; recapture from Canvas before official grading.</p>}</div>
                 <div className="directions-editor">

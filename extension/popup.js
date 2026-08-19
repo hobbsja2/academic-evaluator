@@ -1,10 +1,13 @@
 const captureButton = document.querySelector('#capture');
+const activeCourseElement = document.querySelector('#active-course');
 const statusElement = document.querySelector('#status');
 const summaryElement = document.querySelector('#summary');
 const captureCountsElement = document.querySelector('#capture-counts');
 const completenessElement = document.querySelector('#completeness');
 const importUrl = 'http://127.0.0.1:8787/api/rubrics/import';
 const directionsImportUrl = 'http://127.0.0.1:8787/api/rubrics/directions/import';
+const activeCourseUrl = 'http://127.0.0.1:8787/api/courses/active';
+let activeCourse = null;
 
 function setStatus(message, kind = '') {
   statusElement.textContent = message;
@@ -61,6 +64,36 @@ async function jsonResponse(response) {
   }
 }
 
+function courseLabel(course) {
+  return `${course.code} · Section ${course.section} · ${course.term}`;
+}
+
+async function refreshActiveCourse() {
+  let response;
+  try {
+    response = await fetch(activeCourseUrl, { method: 'GET', cache: 'no-store' });
+  } catch {
+    activeCourse = null;
+    activeCourseElement.textContent = 'Local application unavailable.';
+    captureButton.disabled = true;
+    throw new Error('Open the local application and select a course before capturing.');
+  }
+  const payload = await jsonResponse(response).catch(() => null);
+  const course = payload?.activeCourse;
+  if (!response.ok || !course || typeof course.id !== 'string' ||
+      typeof course.code !== 'string' || typeof course.section !== 'string' ||
+      typeof course.term !== 'string' || typeof course.token !== 'string') {
+    activeCourse = null;
+    activeCourseElement.textContent = 'No local course selected.';
+    captureButton.disabled = true;
+    throw new Error('Select a course in the local application before capturing.');
+  }
+  activeCourse = course;
+  activeCourseElement.textContent = `Saving to: ${courseLabel(course)}`;
+  captureButton.disabled = false;
+  return course;
+}
+
 async function captureActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -86,19 +119,19 @@ async function captureActiveTab() {
   }
 }
 
-async function importRubric(data) {
+async function importRubric(data, selectedCourseToken) {
   try {
     const response = await fetch(importUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
+      body: JSON.stringify({ ...data, selectedCourseToken })
     });
     const payload = await jsonResponse(response);
     if (!response.ok) {
       const serverError = typeof payload?.error === 'string' ? payload.error.trim() : '';
       throw new Error(serverError || `Import failed (${response.status}).`);
     }
-    if (!payload || typeof payload.persisted !== 'boolean') {
+    if (!payload || payload.persisted !== true || !payload.course) {
       throw new Error('The local importer returned an invalid response.');
     }
     return payload;
@@ -108,12 +141,12 @@ async function importRubric(data) {
   }
 }
 
-async function importDirections(data) {
+async function importDirections(data, selectedCourseToken) {
   try {
     const response = await fetch(directionsImportUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
+      body: JSON.stringify({ ...data, selectedCourseToken })
     });
     const payload = await jsonResponse(response);
     if (!response.ok || payload?.staged !== true) {
@@ -127,12 +160,13 @@ async function importDirections(data) {
   }
 }
 
-function renderDirectionsStaged(diagnostics) {
+function renderDirectionsStaged(payload, diagnostics) {
   captureCountsElement.textContent = 'Assignment directions captured · rubric pending';
   completenessElement.textContent = 'Within 30 minutes, select Preview Rubric in Canvas, then run Capture and import again.';
   completenessElement.className = 'warning';
   summaryElement.hidden = false;
-  setStatus('Directions staged in local server memory for this assignment.', 'success');
+  const target = payload?.course ? courseLabel(payload.course) : 'the selected local course';
+  setStatus(`Directions staged for ${target}.`, 'success');
   if (diagnostics) diagnostics.assignmentDirectionsCaptured = true;
 }
 
@@ -140,34 +174,34 @@ function renderImportResult(payload, diagnostics) {
   if (payload.directionsMerged && diagnostics) diagnostics.assignmentDirectionsCaptured = true;
   renderSummary(diagnostics);
   if (payload.persisted) {
-    const version = Number.isFinite(payload.version) ? ` as version ${payload.version}` : '';
+    const version = Number.isFinite(payload.version) ? ` as rubric version ${payload.version}` : '';
     const merged = payload.directionsMerged ? ' Staged assignment directions were merged.' : '';
-    setStatus(`Persisted locally${version}.${merged}`, 'success');
-    return;
+    setStatus(`Saved to ${courseLabel(payload.course)}${version}.${merged}`, 'success');
   }
-  setStatus(
-    'Captured in server memory only; it will not survive a restart. Course matching requires the Canvas course ID to be configured locally.',
-    'warning'
-  );
 }
 
 async function captureAndImport() {
   try {
+    const selectedCourse = await refreshActiveCourse();
     const result = await captureActiveTab();
     if (result.captureType === 'directions-only') {
       setStatus('Staging assignment directions locally…');
-      await importDirections(result.data);
-      renderDirectionsStaged(result.diagnostics);
+      const payload = await importDirections(result.data, selectedCourse.token);
+      renderDirectionsStaged(payload, result.diagnostics);
       return;
     }
-    setStatus('Importing rubric and matching assignment directions…');
-    const payload = await importRubric(result.data);
+    setStatus(`Importing rubric into ${courseLabel(selectedCourse)}…`);
+    const payload = await importRubric(result.data, selectedCourse.token);
     renderImportResult(payload, result.diagnostics);
   } catch (error) {
     if (error instanceof Error) throw error;
     throw new Error('Capture failed.');
   }
 }
+
+void refreshActiveCourse().catch((error) => {
+  setStatus(error instanceof Error ? error.message : 'Select a course in the local application.', 'warning');
+});
 
 captureButton.addEventListener('click', async () => {
   captureButton.disabled = true;
@@ -178,6 +212,6 @@ captureButton.addEventListener('click', async () => {
   } catch (error) {
     setStatus(error instanceof Error ? error.message : 'Capture failed.', 'error');
   } finally {
-    captureButton.disabled = false;
+    captureButton.disabled = !activeCourse;
   }
 });

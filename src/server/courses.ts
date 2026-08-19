@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { requireDatabase } from "./db.js";
@@ -32,6 +33,52 @@ const selectColumns = `id, code, section, title, term,
   start_date::text AS "startDate", end_date::text AS "endDate",
   purge_after::text AS "purgeAfter", canvas_course_id AS "canvasCourseId",
   canvas_url AS "canvasUrl", created_at::text AS "createdAt"`;
+const activeCourseColumns = `id, code, section, title, term`;
+
+export type ActiveCourseSelection = {
+  id: string;
+  code: string;
+  section: string;
+  title: string | null;
+  term: string;
+  token: string;
+};
+
+let activeCourse: ActiveCourseSelection | null = null;
+
+export function requireActiveCourseSelection(expectedToken: string): ActiveCourseSelection {
+  if (!activeCourse) throw new HttpError(409, "Select a course in the local application before importing from Canvas");
+  if (activeCourse.token !== expectedToken) {
+    throw new HttpError(409, "The selected course changed. Reopen the extension and capture again");
+  }
+  return activeCourse;
+}
+
+function safeActiveCourse() {
+  return activeCourse ? { ...activeCourse } : null;
+}
+
+router.get("/active", (_request, response) => {
+  response.set("Cache-Control", "no-store").json({ activeCourse: safeActiveCourse() });
+});
+
+router.put("/active", async (request, response) => {
+  try {
+    const courseId = z.object({ courseId: idSchema }).parse(request.body).courseId;
+    const database = requireDatabase();
+    const result = await database.query(`SELECT ${activeCourseColumns} FROM courses WHERE id = $1`, [courseId]);
+    if (!result.rows[0]) throw new HttpError(404, "Course not found");
+    activeCourse = { ...result.rows[0], token: randomUUID() } as ActiveCourseSelection;
+    response.set("Cache-Control", "no-store").json({ activeCourse: safeActiveCourse() });
+  } catch (error) {
+    throw error;
+  }
+});
+
+router.delete("/active", (_request, response) => {
+  activeCourse = null;
+  response.status(204).end();
+});
 
 router.get("/", async (_request, response) => {
   const database = requireDatabase();
@@ -102,6 +149,7 @@ router.delete("/:id", async (request, response) => {
   const database = requireDatabase();
   const result = await database.query("DELETE FROM courses WHERE id = $1 RETURNING id", [id]);
   if (!result.rows[0]) throw new HttpError(404, "Course not found");
+  if (activeCourse?.id === id) activeCourse = null;
   response.status(204).end();
 });
 
