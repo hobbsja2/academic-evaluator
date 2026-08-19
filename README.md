@@ -44,5 +44,6 @@ The extension has no Canvas host permission and stores no Canvas credentials, co
 - An encrypted crosswalk can be unlocked in the app when an identity label is needed. Decryption occurs in server memory, and the returned identity-label/pseudonym mappings remain only in React memory until the page reloads or the selected course changes. They are not saved to Neon, localStorage, sessionStorage, or IndexedDB.
 - Plaintext CSV export remains available as an explicitly acknowledged fallback. It contains identifiable, unencrypted student data and must be stored outside this repository in an approved secure location.
 - Course data is deleted with cascading relationships 21 days after the course end date. Cleanup runs at startup and every six hours while the server is running.
+- Rubric rating point values are scoring anchors, not exclusive allowed scores. The local grader may recommend any defensible value from zero through the criterion maximum—including values between anchors—while using the best-fitting qualitative rating label. The professor can edit both fields and makes the final determination.
 - The tool suggests grades only. A professor must review/edit every criterion and manually enter approved results in Canvas.
 - When APA evaluation is disabled, the grading prompt explicitly prohibits APA-based deductions or criticism.

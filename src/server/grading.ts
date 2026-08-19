@@ -54,7 +54,7 @@ function promptFor(body: z.infer<typeof requestSchema>): string {
     ? "APA style is enabled; apply APA-related rubric requirements only where the rubric explicitly supports them."
     : "APA style is disabled. You MUST NOT deduct points, lower ratings, criticize, or mention APA formatting/citations for any reason.";
   return `You are a grading assistant. Evaluate only against the supplied rubric. ${apaRule}
-Return one result per criterion. Use concise Canvas-ready explanations, direct submission evidence, and conservative confidence. Set reviewRequired true for ambiguity or confidence below 0.75.
+Return one result per criterion. Treat displayed rubric rating points as anchor examples, not the only allowed scores. Choose the best-fitting displayed qualitative rating label when labels are available, but award any defensible numeric value from zero through the criterion maximum, including values between rating anchors. Do not force points to equal a displayed anchor. Explain criterion-specific deductions clearly. Use concise Canvas-ready explanations, direct submission evidence, and conservative confidence. Set reviewRequired true for ambiguity or confidence below 0.75.
 RUBRIC JSON:\n${JSON.stringify(body.rubric)}\nSUBMISSION TEXT:\n${body.submissionText}`;
 }
 const ollamaFormat = {
