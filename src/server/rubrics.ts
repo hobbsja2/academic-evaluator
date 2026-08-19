@@ -6,6 +6,7 @@ import { getDatabase, withTransaction } from "./db.js";
 import { HttpError } from "./errors.js";
 
 const MAX_ASSIGNMENT_DIRECTIONS_LENGTH = 50_000;
+const PENDING_DIRECTIONS_TTL_MS = 30 * 60 * 1000;
 const ratingSchema = z.object({
   id: z.union([z.string(), z.number()]).transform(String),
   name: z.string().nullable(),
@@ -33,9 +34,19 @@ const importSchema = z.object({
   capturedAt: z.iso.datetime().optional()
 });
 const updateDirectionsSchema = z.object({ assignmentDirections: directionsSchema });
+const directionsImportSchema = z.object({
+  courseId: z.union([z.string(), z.number()]).transform(String),
+  courseName: z.string().nullable().optional(),
+  assignmentId: z.union([z.string(), z.number()]).transform(String),
+  assignmentName: z.string().nullable().optional(),
+  assignmentDirections: z.string().trim().min(1).max(MAX_ASSIGNMENT_DIRECTIONS_LENGTH),
+  sourceUrl: z.url().nullable().optional(),
+  capturedAt: z.iso.datetime().optional()
+});
 
 const router = Router();
 const latest = new Map<string, NormalizedRubric>();
+const pendingDirections = new Map<string, { directions: string; expiresAt: number }>();
 
 function normalizedDirections(value: string | null | undefined): string | null {
   return value?.trim() || null;
@@ -72,6 +83,10 @@ function normalize(input: z.infer<typeof importSchema>): NormalizedRubric {
 
 function memoryKey(rubric: NormalizedRubric): string {
   return `${rubric.courseId ?? rubric.courseName ?? "unknown"}\0${rubric.assignmentId ?? rubric.assignmentName ?? "unknown"}`;
+}
+
+function pendingDirectionsKey(value: { courseId: string | null; assignmentId: string | null }): string | null {
+  return value.courseId && value.assignmentId ? `${value.courseId}\0${value.assignmentId}` : null;
 }
 
 async function persistRubric(rubric: NormalizedRubric): Promise<{ persisted: boolean; rubricId?: string; version?: number }> {
@@ -122,12 +137,30 @@ async function persistRubric(rubric: NormalizedRubric): Promise<{ persisted: boo
   }
 }
 
+router.post("/directions/import", (request, response) => {
+  const body = directionsImportSchema.parse(request.body);
+  const key = pendingDirectionsKey({ courseId: body.courseId, assignmentId: body.assignmentId });
+  if (!key) throw new HttpError(400, "Canvas course and assignment IDs are required");
+  pendingDirections.set(key, {
+    directions: body.assignmentDirections,
+    expiresAt: Date.now() + PENDING_DIRECTIONS_TTL_MS
+  });
+  response.status(201).json({ staged: true, expiresInMinutes: 30 });
+});
+
 router.post("/import", async (request, response) => {
   try {
-    const rubric = normalize(importSchema.parse(request.body));
+    const parsed = importSchema.parse(request.body);
+    const key = pendingDirectionsKey(parsed);
+    const pending = key ? pendingDirections.get(key) : undefined;
+    if (key && pending && pending.expiresAt <= Date.now()) pendingDirections.delete(key);
+    const stagedDirections = pending && pending.expiresAt > Date.now() ? pending.directions : undefined;
+    const assignmentDirections = normalizedDirections(parsed.assignmentDirections) ?? stagedDirections ?? null;
+    const rubric = normalize({ ...parsed, assignmentDirections });
     latest.set(memoryKey(rubric), rubric);
     const persistence = await persistRubric(rubric);
-    response.status(201).json({ rubric, ...persistence });
+    if (key) pendingDirections.delete(key);
+    response.status(201).json({ rubric, directionsMerged: Boolean(stagedDirections), ...persistence });
   } catch (error) {
     throw error;
   }

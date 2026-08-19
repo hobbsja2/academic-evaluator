@@ -237,21 +237,59 @@
   }
 
   function assignmentDirectionsFromPage() {
-    const { node } = firstMatch(document, [
+    const selectors = [
       '#assignment_show .description.user_content',
       '#assignment_show .assignment_description',
       '#assignment_description',
       '[data-testid="assignment-description"]',
       '.assignment-description .user_content',
       '.assignment-description'
-    ]);
-    return node && !isExplicitlyHidden(node) ? boundedPlainText(node.innerHTML) : null;
+    ];
+    const { node } = firstMatch(document, selectors);
+    if (node && !isExplicitlyHidden(node)) return boundedPlainText(node.innerHTML);
+
+    const frames = document.querySelectorAll([
+      '#assignment_show iframe.user_content_iframe',
+      '#assignment_show .description iframe',
+      '#assignment_description iframe',
+      'iframe[data-testid="assignment-description"]'
+    ].join(', '));
+    for (const frame of frames) {
+      if (isExplicitlyHidden(frame)) continue;
+      try {
+        const body = frame.contentDocument?.body;
+        const directions = body ? boundedPlainText(body.innerHTML) : null;
+        if (directions) return directions;
+      } catch {
+        // Cross-origin assignment frames remain inaccessible; the Canvas API fallback may still work.
+      }
+    }
+    return null;
   }
 
   function assignmentDirectionsFromApi(assignment, diagnostics) {
     const assignmentDirections = boundedPlainText(assignment.description);
     diagnostics.assignmentDirectionsCaptured = Boolean(assignmentDirections);
     return assignmentDirections;
+  }
+
+  function directionsOnlyResult(urlDetails, assignmentName, assignmentDirections, diagnostics) {
+    if (!urlDetails.courseId || !urlDetails.assignmentId || !assignmentDirections) return null;
+    diagnostics.assignmentDirectionsCaptured = true;
+    return {
+      ok: true,
+      captureType: 'directions-only',
+      data: {
+        courseId: urlDetails.courseId,
+        assignmentId: urlDetails.assignmentId,
+        courseName: namesFromPage().courseName,
+        assignmentName: assignmentName || namesFromPage().assignmentName,
+        assignmentDirections,
+        sourceUrl: urlDetails.sourceUrl,
+        capturedAt: new Date().toISOString()
+      },
+      diagnostics
+    };
   }
 
   function jsonObject(value) {
@@ -403,7 +441,17 @@
       });
       if (!response.ok) return null;
       const assignment = await response.json();
-      return normalizeApiAssignment(assignment, urlDetails, diagnostics);
+      const rubricResult = normalizeApiAssignment(assignment, urlDetails, diagnostics);
+      if (rubricResult) return rubricResult;
+      const assignmentObject = jsonObject(assignment);
+      if (!assignmentObject) return null;
+      const assignmentDirections = assignmentDirectionsFromApi(assignmentObject, diagnostics);
+      return directionsOnlyResult(
+        urlDetails,
+        preservedString(assignmentObject.name),
+        assignmentDirections,
+        diagnostics
+      );
     } catch {
       return null;
     }
@@ -713,6 +761,33 @@
     return successfulCapture(located.node, criteria, diagnostics);
   }
 
+  async function captureFallback(urlDetails, domDiagnostics) {
+    if (urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
+      const apiDiagnostics = createDiagnostics('canvas-assignment-api');
+      try {
+        const apiResult = await captureAssignmentApi(urlDetails, apiDiagnostics);
+        if (apiResult?.ok) return apiResult;
+      } catch {
+        // Do not surface response details from authenticated assignment requests.
+      }
+      const directionsResult = directionsOnlyResult(
+        urlDetails,
+        namesFromPage().assignmentName,
+        assignmentDirectionsFromPage(),
+        domDiagnostics
+      );
+      if (directionsResult) return directionsResult;
+      return failure(
+        'Could not find readable criteria in the visible rubric or authenticated assignment data.',
+        apiDiagnostics
+      );
+    }
+    return failure(
+      'Could not find a readable visible rubric, and authenticated assignment data was unavailable for this page.',
+      domDiagnostics
+    );
+  }
+
   async function capture() {
     const domDiagnostics = createDiagnostics();
     let domResult;
@@ -737,25 +812,7 @@
       }
       return domResult;
     }
-
-    if (urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
-      const apiDiagnostics = createDiagnostics('canvas-assignment-api');
-      try {
-        const apiResult = await captureAssignmentApi(urlDetails, apiDiagnostics);
-        if (apiResult?.ok) return apiResult;
-      } catch {
-        // Do not surface response details from authenticated assignment requests.
-      }
-      return failure(
-        'Could not find readable criteria in the visible rubric or authenticated assignment data.',
-        apiDiagnostics
-      );
-    }
-
-    return failure(
-      'Could not find a readable visible rubric, and authenticated assignment data was unavailable for this page.',
-      domDiagnostics
-    );
+    return captureFallback(urlDetails, domDiagnostics);
   }
 
   globalThis.captureCanvasRubric = capture;

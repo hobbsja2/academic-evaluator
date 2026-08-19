@@ -4,6 +4,7 @@ const summaryElement = document.querySelector('#summary');
 const captureCountsElement = document.querySelector('#capture-counts');
 const completenessElement = document.querySelector('#completeness');
 const importUrl = 'http://127.0.0.1:8787/api/rubrics/import';
+const directionsImportUrl = 'http://127.0.0.1:8787/api/rubrics/directions/import';
 
 function setStatus(message, kind = '') {
   statusElement.textContent = message;
@@ -107,11 +108,41 @@ async function importRubric(data) {
   }
 }
 
+async function importDirections(data) {
+  try {
+    const response = await fetch(directionsImportUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    const payload = await jsonResponse(response);
+    if (!response.ok || payload?.staged !== true) {
+      const serverError = typeof payload?.error === 'string' ? payload.error.trim() : '';
+      throw new Error(serverError || `Directions import failed (${response.status}).`);
+    }
+    return payload;
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error('Could not stage assignment directions locally.');
+  }
+}
+
+function renderDirectionsStaged(diagnostics) {
+  captureCountsElement.textContent = 'Assignment directions captured · rubric pending';
+  completenessElement.textContent = 'Within 30 minutes, select Preview Rubric in Canvas, then run Capture and import again.';
+  completenessElement.className = 'warning';
+  summaryElement.hidden = false;
+  setStatus('Directions staged in local server memory for this assignment.', 'success');
+  if (diagnostics) diagnostics.assignmentDirectionsCaptured = true;
+}
+
 function renderImportResult(payload, diagnostics) {
+  if (payload.directionsMerged && diagnostics) diagnostics.assignmentDirectionsCaptured = true;
   renderSummary(diagnostics);
   if (payload.persisted) {
     const version = Number.isFinite(payload.version) ? ` as version ${payload.version}` : '';
-    setStatus(`Persisted locally${version}.`, 'success');
+    const merged = payload.directionsMerged ? ' Staged assignment directions were merged.' : '';
+    setStatus(`Persisted locally${version}.${merged}`, 'success');
     return;
   }
   setStatus(
@@ -123,7 +154,13 @@ function renderImportResult(payload, diagnostics) {
 async function captureAndImport() {
   try {
     const result = await captureActiveTab();
-    setStatus('Importing rubric…');
+    if (result.captureType === 'directions-only') {
+      setStatus('Staging assignment directions locally…');
+      await importDirections(result.data);
+      renderDirectionsStaged(result.diagnostics);
+      return;
+    }
+    setStatus('Importing rubric and matching assignment directions…');
     const payload = await importRubric(result.data);
     renderImportResult(payload, result.diagnostics);
   } catch (error) {
