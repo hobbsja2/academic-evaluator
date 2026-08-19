@@ -140,8 +140,15 @@
   }
 
   function safeUrlDetails(value) {
+    const empty = { courseId: null, assignmentId: null, sourceUrl: null, origin: null };
     try {
       const url = new URL(value);
+      const activeOrigin = new URL(location.origin);
+      if (!['http:', 'https:'].includes(url.protocol) ||
+          !['http:', 'https:'].includes(activeOrigin.protocol) ||
+          url.origin !== activeOrigin.origin || url.username || url.password) {
+        return empty;
+      }
       const decode = (part) => {
         if (!part) return null;
         try {
@@ -150,20 +157,229 @@
           return null;
         }
       };
-      const courseId = decode(url.pathname.match(/\/courses\/([^/]+)/i)?.[1]);
-      const pathAssignmentId = decode(url.pathname.match(/\/assignments\/([^/]+)/i)?.[1]);
-      const queryAssignmentId = decode(
-        url.searchParams.get('assignment_id') || url.searchParams.get('assignmentId')
+      const assignmentMatch = url.pathname.match(
+        /\/courses\/([^/]+)\/assignments\/([^/]+)(?:\/|$)/i
       );
+      const speedGraderMatch = url.pathname.match(
+        /\/courses\/([^/]+)\/gradebook\/speed_grader\/?$/i
+      );
+      const courseId = decode(assignmentMatch?.[1] || speedGraderMatch?.[1]);
+      const assignmentId = assignmentMatch
+        ? decode(assignmentMatch[2])
+        : speedGraderMatch
+          ? decode(url.searchParams.get('assignment_id') || url.searchParams.get('assignmentId'))
+          : null;
       url.search = '';
       url.hash = '';
       return {
         courseId,
-        assignmentId: pathAssignmentId || queryAssignmentId,
-        sourceUrl: `${url.origin}${url.pathname}`
+        assignmentId,
+        sourceUrl: `${url.origin}${url.pathname}`,
+        origin: url.origin
       };
     } catch {
-      return { courseId: null, assignmentId: null, sourceUrl: null };
+      return empty;
+    }
+  }
+
+  function preservedString(value) {
+    return typeof value === 'string' && value.trim() ? value : null;
+  }
+
+  function htmlToPlainText(value) {
+    const source = preservedString(value);
+    if (!source) return null;
+    try {
+      const parsed = new DOMParser().parseFromString(source, 'text/html');
+      const blocks = new Set([
+        'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'FIELDSET', 'FIGURE',
+        'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HR', 'LI',
+        'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TR', 'UL'
+      ]);
+      let output = '';
+      const newline = () => {
+        if (output && !output.endsWith('\n')) output += '\n';
+      };
+      const visit = (node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          output += node.nodeValue || '';
+          return;
+        }
+        if (!(node instanceof Element)) return;
+        if (node.tagName === 'BR') {
+          newline();
+          return;
+        }
+        const block = blocks.has(node.tagName);
+        if (block) newline();
+        for (const child of node.childNodes) visit(child);
+        if (block) newline();
+      };
+      for (const child of parsed.body.childNodes) visit(child);
+      const plainText = output
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u00a0/g, ' ')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      return plainText || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function jsonObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  }
+
+  function jsonId(value, fallback) {
+    if (typeof value === 'string') return clean(value) || fallback;
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    return fallback;
+  }
+
+  function jsonPoints(value) {
+    if (value === null || value === undefined || value === '') {
+      return { value: null, invalid: false };
+    }
+    const parsed = typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\s*-?\d+(?:\.\d+)?\s*$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+    return Number.isFinite(parsed) && parsed >= 0
+      ? { value: parsed, invalid: false }
+      : { value: null, invalid: true };
+  }
+
+  function parseApiRating(value, index, criterionId) {
+    const rating = jsonObject(value);
+    if (!rating) return null;
+    const points = jsonPoints(rating.points);
+    const name = preservedString(rating.description);
+    const description = htmlToPlainText(rating.long_description);
+    const data = {
+      id: jsonId(rating.id, `${criterionId}-rating-${index + 1}`),
+      name,
+      description,
+      points: points.value
+    };
+    return {
+      data,
+      meaningful: Boolean(name || description || points.value !== null),
+      missingDescription: !description,
+      invalidPoint: points.invalid
+    };
+  }
+
+  function parseApiCriterion(value, index) {
+    const criterion = jsonObject(value);
+    if (!criterion) {
+      return { data: null, meaningful: false, malformed: true };
+    }
+    const criterionId = jsonId(criterion.id, `criterion-${index + 1}`);
+    const parsedRatings = Array.isArray(criterion.ratings)
+      ? criterion.ratings.map((rating, ratingIndex) =>
+        parseApiRating(rating, ratingIndex, criterionId)).filter(Boolean)
+      : [];
+    const ratings = parsedRatings.filter((rating) => rating.meaningful)
+      .map((rating) => rating.data);
+    const maximum = jsonPoints(criterion.points);
+    const name = preservedString(criterion.description);
+    const description = htmlToPlainText(criterion.long_description);
+    return {
+      data: {
+        id: criterionId,
+        name,
+        description,
+        maximumPoints: maximum.value,
+        ratings
+      },
+      meaningful: Boolean(name || description || ratings.length),
+      malformed: !name && !description,
+      missingRatings: ratings.length === 0,
+      missingMaximum: maximum.value === null,
+      missingRatingDescriptions: parsedRatings.filter((rating) =>
+        rating.meaningful && rating.missingDescription).length,
+      invalidPointCount: Number(maximum.invalid) + parsedRatings.filter((rating) =>
+        rating.invalidPoint).length
+    };
+  }
+
+  function normalizeApiAssignment(value, urlDetails, diagnostics) {
+    const assignment = jsonObject(value);
+    const rubric = assignment && Array.isArray(assignment.rubric) ? assignment.rubric : null;
+    if (!assignment || !rubric) return null;
+    const parsed = rubric.map(parseApiCriterion);
+    const usable = parsed.filter((criterion) => criterion.meaningful);
+    const criteria = usable.map((criterion) => criterion.data);
+    Object.assign(diagnostics, {
+      source: 'canvas-assignment-api',
+      rubricSelector: 'assignment.rubric',
+      criterionSelector: 'assignment.rubric',
+      criterionCandidateCount: rubric.length,
+      parsedCriterionCount: criteria.length,
+      ratingCount: usable.reduce((sum, criterion) => sum + criterion.data.ratings.length, 0),
+      malformedCriterionCount: parsed.filter((criterion) => criterion.malformed).length,
+      missingRatingCount: usable.filter((criterion) => criterion.missingRatings).length,
+      missingRatingDescriptionCount: usable.reduce((sum, criterion) =>
+        sum + criterion.missingRatingDescriptions, 0),
+      missingMaximumPointsCount: usable.filter((criterion) => criterion.missingMaximum).length,
+      invalidPointCount: usable.reduce((sum, criterion) => sum + criterion.invalidPointCount, 0)
+    });
+    if (!criteria.length || criteria.every((criterion) =>
+      !clean(criterion.name) && !clean(criterion.description))) {
+      return null;
+    }
+    const maximums = criteria.map((criterion) => criterion.maximumPoints);
+    const completeMaximums = criteria.length === rubric.length &&
+      maximums.every((points) => Number.isFinite(points));
+    const totalPoints = completeMaximums
+      ? maximums.reduce((sum, points) => sum + points, 0)
+      : null;
+    diagnostics.totalSource = totalPoints === null ? 'missing' : 'criterion-sum';
+    const settings = jsonObject(assignment.rubric_settings);
+    return {
+      ok: true,
+      data: {
+        courseId: urlDetails.courseId,
+        assignmentId: urlDetails.assignmentId,
+        courseName: namesFromPage().courseName,
+        assignmentName: preservedString(assignment.name),
+        rubricTitle: settings ? preservedString(settings.title) : null,
+        criteria,
+        totalPoints,
+        sourceUrl: urlDetails.sourceUrl,
+        capturedAt: new Date().toISOString()
+      },
+      diagnostics,
+      warnings: warningMessages(diagnostics)
+    };
+  }
+
+  async function captureAssignmentApi(urlDetails, diagnostics) {
+    diagnostics.source = 'canvas-assignment-api';
+    diagnostics.rubricSelector = 'assignment.rubric';
+    try {
+      const endpoint = new URL(
+        `/api/v1/courses/${encodeURIComponent(urlDetails.courseId)}` +
+        `/assignments/${encodeURIComponent(urlDetails.assignmentId)}`,
+        urlDetails.origin
+      );
+      endpoint.searchParams.append('include[]', 'rubric');
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        mode: 'same-origin',
+        credentials: 'same-origin',
+        redirect: 'error',
+        headers: { Accept: 'application/json' }
+      });
+      if (!response.ok) return null;
+      const assignment = await response.json();
+      return normalizeApiAssignment(assignment, urlDetails, diagnostics);
+    } catch {
+      return null;
     }
   }
 
@@ -358,8 +574,9 @@
     return { node: null, selector: null };
   }
 
-  function createDiagnostics() {
+  function createDiagnostics(source = 'canvas-dom') {
     return {
+      source,
       rubricSelector: null,
       criterionSelector: null,
       criterionCandidateCount: 0,
@@ -466,13 +683,35 @@
     return successfulCapture(located.node, criteria, diagnostics);
   }
 
-  function capture() {
-    const diagnostics = createDiagnostics();
+  async function capture() {
+    const domDiagnostics = createDiagnostics();
+    let domResult;
     try {
-      return captureRubric(diagnostics);
+      domResult = captureRubric(domDiagnostics);
     } catch {
-      return failure('Could not read this rubric.', diagnostics);
+      domResult = failure('Could not read the visible rubric.', domDiagnostics);
     }
+    if (domResult.ok) return domResult;
+
+    const urlDetails = safeUrlDetails(location.href);
+    if (urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
+      const apiDiagnostics = createDiagnostics('canvas-assignment-api');
+      try {
+        const apiResult = await captureAssignmentApi(urlDetails, apiDiagnostics);
+        if (apiResult?.ok) return apiResult;
+      } catch {
+        // Do not surface response details from authenticated assignment requests.
+      }
+      return failure(
+        'Could not find readable criteria in the visible rubric or authenticated assignment data.',
+        apiDiagnostics
+      );
+    }
+
+    return failure(
+      'Could not find a readable visible rubric, and authenticated assignment data was unavailable for this page.',
+      domDiagnostics
+    );
   }
 
   globalThis.captureCanvasRubric = capture;

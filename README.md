@@ -30,11 +30,11 @@ Open `http://127.0.0.1:5173`. The API listens only on `127.0.0.1:8787`.
 1. Open `chrome://extensions` or `edge://extensions`.
 2. Enable **Developer mode** and choose **Load unpacked**.
 3. Select the repository's `extension` folder.
-4. Open an authenticated Canvas standard assignment or SpeedGrader page, expand its rubric, and click **Capture and import**.
+4. Open an authenticated Canvas standard assignment or SpeedGrader page and click **Capture and import**. If an expanded rubric is readable, the extension parses that DOM first. Otherwise, on a recognized assignment URL, it makes a same-origin, read-only Canvas Assignment API request for that assignment's official rubric using the page's existing authenticated session.
 
-The popup reports a privacy-safe completeness summary with criterion/rating counts and warnings for missing ratings, explicit maximum points, or rating descriptor text. It never displays captured rubric text. A capture that cannot be matched to one locally configured course is held in server memory only and will not survive a restart; reliable course matching requires that course's Canvas course ID to be configured locally.
+The popup reports a privacy-safe completeness summary with criterion/rating counts and warnings for missing ratings, explicit maximum points, rating descriptor text, or invalid point values. It never displays captured rubric text, Canvas identifiers, source URLs, API response content, or HTML. A capture that cannot be matched to one locally configured course is held in server memory only and will not survive a restart; reliable course matching requires that course's Canvas course ID to be configured locally.
 
-The extension has no Canvas host permission and stores no Canvas credentials or cookies. It reads only the active page after an explicit click. For official use, proceed only when the capture reports zero completeness warnings, or have faculty verify the captured rubric directly against Canvas before grading.
+The extension has no Canvas host permission and stores no Canvas credentials, cookies, tokens, or request headers. It acts only on the active page after an explicit click, keeps visible DOM parsing as the first capture method, and limits the fallback to a same-origin `GET` on a standard assignment or SpeedGrader URL. For official use, proceed only when the capture reports zero completeness warnings, or have faculty verify the captured rubric directly against Canvas before grading.
 
 ## Privacy and retention
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Canvas Rubric Capture",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Capture the rubric visible on the active Canvas assignment and import it locally.",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": ["http://127.0.0.1:8787/*"],

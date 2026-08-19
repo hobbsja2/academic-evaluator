@@ -71,9 +71,12 @@ async function captureActiveTab() {
     });
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => globalThis.captureCanvasRubric()
+      func: async () => globalThis.captureCanvasRubric()
     });
-    if (!result?.ok) throw new Error(result?.error || 'No readable rubric was found.');
+    if (!result?.ok) {
+      throw new Error(result?.error ||
+        'No readable expanded rubric or authenticated assignment rubric was found.');
+    }
     return result;
   } catch (error) {
     if (error instanceof Error) throw error;
@@ -131,7 +134,7 @@ async function captureAndImport() {
 captureButton.addEventListener('click', async () => {
   captureButton.disabled = true;
   clearSummary();
-  setStatus('Reading the visible Canvas rubric…');
+  setStatus('Reading an expanded Canvas rubric or retrieving the active assignment rubric…');
   try {
     await captureAndImport();
   } catch (error) {
