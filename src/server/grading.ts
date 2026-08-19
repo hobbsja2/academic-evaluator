@@ -180,9 +180,12 @@ router.post("/", async (request, response) => {
         ],
         options: { temperature: 0.1 }
       }),
-      signal: AbortSignal.timeout(120_000)
+      signal: AbortSignal.timeout(config.ollamaTimeoutMs)
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new HttpError(504, `Local grading timed out after ${Math.ceil(config.ollamaTimeoutMs / 1000)} seconds. Warm the Ollama model and try again.`);
+    }
     throw new HttpError(503, "Local Ollama service is unavailable");
   }
   if (!ollamaResponse.ok) throw new HttpError(502, "Local Ollama grading request failed");

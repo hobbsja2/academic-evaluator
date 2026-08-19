@@ -9,6 +9,7 @@ const envSchema = z.object({
   STUDENT_IDENTITY_KEY: z.string().min(32).optional(),
   OLLAMA_BASE_URL: z.string().url().default("http://127.0.0.1:11434"),
   OLLAMA_MODEL: z.string().trim().min(1).default("qwen3:4b-instruct"),
+  OLLAMA_TIMEOUT_MS: z.coerce.number().int().min(30_000).max(900_000).default(300_000),
   LIBREOFFICE_PATH: z.string().trim().min(1).default(defaultLibreOffice),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   JSON_LIMIT: z.string().trim().min(1).default("1mb")
@@ -26,6 +27,7 @@ export const config = {
   studentIdentityKey: parsed.STUDENT_IDENTITY_KEY,
   ollamaBaseUrl: ollamaUrl.toString().replace(/\/$/, ""),
   ollamaModel: parsed.OLLAMA_MODEL,
+  ollamaTimeoutMs: parsed.OLLAMA_TIMEOUT_MS,
   libreOfficePath: parsed.LIBREOFFICE_PATH,
   port: parsed.PORT,
   jsonLimit: parsed.JSON_LIMIT

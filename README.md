@@ -23,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. The API listens only on `127.0.0.1:8787`.
+Open `http://127.0.0.1:5173`. The API listens only on `127.0.0.1:8787`. The first grading request on a cold or CPU-only computer can take several minutes; the default local inference timeout is five minutes and can be adjusted with `OLLAMA_TIMEOUT_MS` (30,000–900,000 milliseconds). Known service errors are shown safely in the UI, while unexpected server errors remain masked.
 
 ## Canvas extension
 

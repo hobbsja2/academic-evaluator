@@ -15,6 +15,7 @@ try {
     `STUDENT_IDENTITY_KEY=${identityKey}`,
     "OLLAMA_BASE_URL=http://127.0.0.1:11434",
     "OLLAMA_MODEL=qwen3:4b-instruct",
+    "OLLAMA_TIMEOUT_MS=300000",
     "LIBREOFFICE_PATH=C:\\Program Files\\LibreOffice\\program\\soffice.com",
     "PORT=8787",
     ""

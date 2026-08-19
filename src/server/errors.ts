@@ -15,7 +15,9 @@ export const notFound: RequestHandler = (_request, _response, next) => {
 
 export const safeErrorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
   let status = Number(error?.status) || 500;
-  let message = status < 500 ? String(error?.message || "Request failed") : "Internal server error";
+  let message = error instanceof HttpError
+    ? error.message
+    : status < 500 ? String(error?.message || "Request failed") : "Internal server error";
   if (error instanceof ZodError) {
     status = 400;
     message = error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; ");
