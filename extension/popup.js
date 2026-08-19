@@ -29,8 +29,9 @@ function renderSummary(diagnostics) {
   const missingMaximums = safeCount(diagnostics?.missingMaximumPointsCount);
   const missingDescriptors = safeCount(diagnostics?.missingRatingDescriptionCount);
   const invalidPoints = safeCount(diagnostics?.invalidPointCount);
+  const directionsCaptured = diagnostics?.assignmentDirectionsCaptured === true;
 
-  captureCountsElement.textContent = `${criteria} criteria · ${ratings} ratings`;
+  captureCountsElement.textContent = `${criteria} criteria · ${ratings} ratings · assignment directions ${directionsCaptured ? 'captured' : 'not found'}`;
   const warnings = [];
   if (malformed) warnings.push(`${malformed} malformed criteria`);
   if (missingRatings) warnings.push(`${missingRatings} criteria without ratings`);
@@ -134,7 +135,7 @@ async function captureAndImport() {
 captureButton.addEventListener('click', async () => {
   captureButton.disabled = true;
   clearSummary();
-  setStatus('Reading an expanded Canvas rubric or retrieving the active assignment rubric…');
+  setStatus('Reading the Canvas rubric and assignment directions…');
   try {
     await captureAndImport();
   } catch (error) {

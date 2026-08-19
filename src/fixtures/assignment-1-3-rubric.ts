@@ -13,6 +13,7 @@ export const assignment13Rubric: NormalizedRubric = {
   courseName: "MGMT 436",
   assignmentId: "assignment-1-3",
   assignmentName: "1.3 Assignment",
+  assignmentDirections: null,
   rubricTitle: "1.3 Assignment Rubric",
   totalPoints: 100,
   capturedAt: "2026-01-01T00:00:00.000Z",

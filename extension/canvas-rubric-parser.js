@@ -1,5 +1,6 @@
 (() => {
   const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const MAX_ASSIGNMENT_DIRECTIONS_LENGTH = 50_000;
 
   const RUBRIC_SELECTORS = [
     '#rubric_full',
@@ -206,6 +207,7 @@
           return;
         }
         if (!(node instanceof Element)) return;
+        if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG'].includes(node.tagName)) return;
         if (node.tagName === 'BR') {
           newline();
           return;
@@ -227,6 +229,29 @@
     } catch {
       return null;
     }
+  }
+
+  function boundedPlainText(value) {
+    const plainText = htmlToPlainText(value);
+    return plainText ? plainText.slice(0, MAX_ASSIGNMENT_DIRECTIONS_LENGTH) : null;
+  }
+
+  function assignmentDirectionsFromPage() {
+    const { node } = firstMatch(document, [
+      '#assignment_show .description.user_content',
+      '#assignment_show .assignment_description',
+      '#assignment_description',
+      '[data-testid="assignment-description"]',
+      '.assignment-description .user_content',
+      '.assignment-description'
+    ]);
+    return node && !isExplicitlyHidden(node) ? boundedPlainText(node.innerHTML) : null;
+  }
+
+  function assignmentDirectionsFromApi(assignment, diagnostics) {
+    const assignmentDirections = boundedPlainText(assignment.description);
+    diagnostics.assignmentDirectionsCaptured = Boolean(assignmentDirections);
+    return assignmentDirections;
   }
 
   function jsonObject(value) {
@@ -339,7 +364,7 @@
       ? maximums.reduce((sum, points) => sum + points, 0)
       : null;
     diagnostics.totalSource = totalPoints === null ? 'missing' : 'criterion-sum';
-    const settings = jsonObject(assignment.rubric_settings);
+    const settings = jsonObject(assignment.rubric_settings); const assignmentDirections = assignmentDirectionsFromApi(assignment, diagnostics);
     return {
       ok: true,
       data: {
@@ -347,6 +372,7 @@
         assignmentId: urlDetails.assignmentId,
         courseName: namesFromPage().courseName,
         assignmentName: preservedString(assignment.name),
+        assignmentDirections,
         rubricTitle: settings ? preservedString(settings.title) : null,
         criteria,
         totalPoints,
@@ -587,6 +613,7 @@
       missingRatingDescriptionCount: 0,
       missingMaximumPointsCount: 0,
       invalidPointCount: 0,
+      assignmentDirectionsCaptured: false,
       totalSource: 'missing'
     };
   }
@@ -647,12 +674,15 @@
       'caption',
       '[role="heading"]'
     ]);
+    const assignmentDirections = assignmentDirectionsFromPage();
+    diagnostics.assignmentDirectionsCaptured = Boolean(assignmentDirections);
     return {
       ok: true,
       data: {
         courseId: urlDetails.courseId,
         assignmentId: urlDetails.assignmentId,
         ...namesFromPage(),
+        assignmentDirections,
         rubricTitle: rubricTitle || null,
         criteria,
         totalPoints: readTotal(rubric, criteria, diagnostics),
@@ -691,9 +721,23 @@
     } catch {
       domResult = failure('Could not read the visible rubric.', domDiagnostics);
     }
-    if (domResult.ok) return domResult;
-
     const urlDetails = safeUrlDetails(location.href);
+    if (domResult.ok) {
+      if (!domResult.data.assignmentDirections && urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
+        const apiDiagnostics = createDiagnostics('canvas-assignment-api');
+        try {
+          const apiResult = await captureAssignmentApi(urlDetails, apiDiagnostics);
+          if (apiResult?.ok && apiResult.data.assignmentDirections) {
+            domResult.data.assignmentDirections = apiResult.data.assignmentDirections;
+            domResult.diagnostics.assignmentDirectionsCaptured = true;
+          }
+        } catch {
+          // The readable DOM rubric remains usable when optional direction retrieval fails.
+        }
+      }
+      return domResult;
+    }
+
     if (urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
       const apiDiagnostics = createDiagnostics('canvas-assignment-api');
       try {

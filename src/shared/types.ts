@@ -32,6 +32,7 @@ export interface NormalizedRubric {
   courseName: string | null;
   assignmentId: string | null;
   assignmentName: string | null;
+  assignmentDirections: string | null;
   rubricTitle: string | null;
   totalPoints: number | null;
   capturedAt: string;

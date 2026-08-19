@@ -58,6 +58,10 @@ textarea { resize: vertical; line-height: 1.45; }
 .course-card, .validation-card, .rubric-summary, .stats { background: #f7fafc; border: 1px solid var(--line); border-radius: 8px; padding: 1rem; margin-top: .8rem; }
 .course-card > div:first-child, .validation-card, .rubric-summary { display: flex; flex-direction: column; gap: .2rem; }
 .course-card span, .validation-card span, .rubric-summary span { color: var(--muted); font-size: .84rem; }
+.directions-editor { margin-top: .8rem; padding: .9rem; background: #f2f8fc; border: 1px solid #b9d4e6; border-radius: 8px; }
+.directions-editor textarea { margin-top: .15rem; }
+.directions-actions { display: flex; align-items: center; gap: .7rem; margin-top: .7rem; }
+.directions-actions span { color: var(--muted); font-size: .78rem; line-height: 1.4; }
 .course-card dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; margin: .9rem 0; }
 .course-card dt { color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 750; }
 .course-card dd { margin: .18rem 0 0; font-size: .82rem; }

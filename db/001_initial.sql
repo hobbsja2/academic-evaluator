@@ -30,12 +30,15 @@ CREATE TABLE IF NOT EXISTS rubrics (
   title text,
   version integer NOT NULL CHECK (version > 0),
   total_points numeric,
+  assignment_directions text,
   source text NOT NULL,
   source_url text,
   captured_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (assignment_id, version)
 );
+
+ALTER TABLE rubrics ADD COLUMN IF NOT EXISTS assignment_directions text;
 
 CREATE TABLE IF NOT EXISTS rubric_criteria (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -74,8 +77,11 @@ CREATE TABLE IF NOT EXISTS grading_runs (
   student_id uuid REFERENCES students(id) ON DELETE CASCADE,
   apa_enabled boolean NOT NULL,
   model text NOT NULL,
+  assignment_directions text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS assignment_directions text;
 
 CREATE TABLE IF NOT EXISTS criterion_results (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

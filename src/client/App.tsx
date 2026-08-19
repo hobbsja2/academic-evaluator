@@ -78,6 +78,7 @@ export default function App() {
   const [extendedEndDate, setExtendedEndDate] = useState("");
   const [rubrics, setRubrics] = useState<StoredRubric[]>([]);
   const [rubricIndex, setRubricIndex] = useState("");
+  const [assignmentDirections, setAssignmentDirections] = useState("");
   const [rosterFile, setRosterFile] = useState<File | null>(null);
   const [validation, setValidation] = useState<Validation | null>(null);
   const [crosswalkConfirmed, setCrosswalkConfirmed] = useState(false);
@@ -120,6 +121,10 @@ export default function App() {
   useEffect(() => {
     setExtendedEndDate(selectedCourse?.endDate ?? "");
   }, [selectedCourse?.id, selectedCourse?.endDate]);
+
+  useEffect(() => {
+    setAssignmentDirections(selectedRubric?.assignmentDirections ?? "");
+  }, [rubricIndex, selectedRubric?.assignmentDirections]);
 
   useEffect(() => {
     setUnlockedMappings([]);
@@ -228,6 +233,21 @@ export default function App() {
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
+  async function saveAssignmentDirections() {
+    if (!selectedRubric?.id) return;
+    setBusy("directions");
+    try {
+      const updated = await api<{ id: string; assignmentDirections: string | null }>(
+        `/api/rubrics/${selectedRubric.id}/directions`,
+        jsonInit("PATCH", { assignmentDirections: assignmentDirections.trim() || null }),
+      );
+      setRubrics((current) => current.map((rubric, index) =>
+        index === Number(rubricIndex) ? { ...rubric, assignmentDirections: updated.assignmentDirections } : rubric));
+      setAssignmentDirections(updated.assignmentDirections ?? "");
+      setNotice({ kind: "success", text: "Assignment directions saved with this rubric version." });
+    } catch (error) { showError(error); } finally { setBusy(""); }
+  }
+
   async function extractDocument(file: File | null) {
     if (!file) return;
     setBusy("document"); setSubmissionText(""); setDocumentName(file.name); setResults([]);
@@ -257,8 +277,12 @@ export default function App() {
       ? { courseId: selectedCourse.id, rubricId: selectedRubric.id, pseudonym: pseudonym.trim() }
       : undefined;
     try {
+      const rubricForGrading = {
+        ...selectedRubric,
+        assignmentDirections: assignmentDirections.trim() || null,
+      };
       const response = await api<{ model: string; gradingRunId: string | null; results: GradeCriterionResult[] }>(
-        "/api/grading", jsonInit("POST", { rubric: selectedRubric, submissionText, apaEnabled, context }),
+        "/api/grading", jsonInit("POST", { rubric: rubricForGrading, submissionText, apaEnabled, context }),
       );
       setResults(response.results); setModel(response.model);
       setNotice({ kind: "success", text: context ? "Suggestions generated and saved as a reviewable run." : "Suggestions generated for review. This run was not persisted." });
@@ -390,7 +414,17 @@ export default function App() {
                 {rubrics.map((rubric, index) => <option key={`${rubric.id || rubric.assignmentId || "rubric"}-${index}`} value={index}>{labelForRubric(rubric)}{rubric.id ? ` · v${rubric.version ?? "?"}` : " · in memory"}</option>)}
               </select>
               <button type="button" className="secondary" disabled={busy === "fixture"} onClick={() => void loadFixture()}>Load Assignment 1.3 fixture</button>
-              {selectedRubric && <div className="rubric-summary"><strong>{labelForRubric(selectedRubric)}</strong><span>{selectedRubric.criteria.length} criteria · {selectedRubric.totalPoints ?? "—"} points</span>{selectedRubric.source === "fixture" && <p className="warning-text"><strong>Fixture warning:</strong> Rating descriptors are incomplete. Use for demonstrations only; recapture from Canvas before official grading.</p>}</div>}
+              {selectedRubric && <>
+                <div className="rubric-summary"><strong>{labelForRubric(selectedRubric)}</strong><span>{selectedRubric.criteria.length} criteria · {selectedRubric.totalPoints ?? "—"} points</span>{selectedRubric.source === "fixture" && <p className="warning-text"><strong>Fixture warning:</strong> Rating descriptors are incomplete. Use for demonstrations only; recapture from Canvas before official grading.</p>}</div>
+                <div className="directions-editor">
+                  <label htmlFor="assignment-directions">Assignment directions (supporting context)</label>
+                  <textarea id="assignment-directions" rows={8} maxLength={50000} value={assignmentDirections} placeholder="No assignment directions were captured. Add or paste faculty-approved directions here if needed." onChange={(event) => { setAssignmentDirections(event.target.value); setResults([]); }} />
+                  <small>{assignmentDirections.length.toLocaleString()} / 50,000 characters. Review before grading. Directions help interpret deliverables but cannot create scoring criteria or override the rubric.</small>
+                  <div className="directions-actions">
+                    {selectedRubric.id ? <button type="button" className="secondary" disabled={busy === "directions"} onClick={() => void saveAssignmentDirections()}>{busy === "directions" ? "Saving…" : "Save directions"}</button> : <span>Edits apply to this browser session and grading request only.</span>}
+                  </div>
+                </div>
+              </>}
             </div>
             <div>
               <label htmlFor="document-file">Student document</label>
