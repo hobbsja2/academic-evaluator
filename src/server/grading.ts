@@ -174,8 +174,11 @@ router.get("/history", async (request, response) => {
   response.json({ history });
 });
 
-router.post("/", async (request, response) => {
-  const body = requestSchema.parse(request.body);
+const MAX_GRADING_ATTEMPTS = 3;
+
+class RetryableModelError extends Error {}
+
+async function requestModelSuggestions(body: z.infer<typeof requestSchema>): Promise<z.infer<typeof suggestionSchema>[]> {
   let ollamaResponse: Response;
   try {
     ollamaResponse = await fetch(`${config.ollamaBaseUrl}/api/chat`, {
@@ -199,35 +202,69 @@ router.post("/", async (request, response) => {
     }
     throw new HttpError(503, "Local Ollama service is unavailable");
   }
-  if (!ollamaResponse.ok) throw new HttpError(502, "Local Ollama grading request failed");
+  if (!ollamaResponse.ok) throw new RetryableModelError("Local Ollama grading request failed");
   let envelope: { message?: { content?: string }; response?: string };
   try {
     envelope = await ollamaResponse.json() as { message?: { content?: string }; response?: string };
-  } catch (error) {
-    throw error;
+  } catch {
+    throw new RetryableModelError("Local Ollama returned an unreadable response");
   }
   const content = envelope.message?.content ?? envelope.response;
-  if (!content) throw new HttpError(502, "Local Ollama returned no grading data");
+  if (!content) throw new RetryableModelError("Local Ollama returned no grading data");
   let decoded: unknown;
-  try { decoded = JSON.parse(content); } catch { throw new HttpError(502, "Local Ollama returned invalid JSON"); }
-  const suggestions = outputSchema.parse(decoded).results;
+  try { decoded = JSON.parse(content); } catch { throw new RetryableModelError("Local Ollama returned invalid JSON"); }
+  const parsed = outputSchema.safeParse(decoded);
+  if (!parsed.success) throw new RetryableModelError("Local Ollama returned an unexpected result shape");
+  const suggestions = parsed.data.results;
   const expected = new Map(body.rubric.criteria.map((item) => [item.sourceId, item]));
   const received = new Set<string>();
   for (const item of suggestions) {
     const criterion = expected.get(item.criterionId);
-    if (!criterion || received.has(item.criterionId)) throw new HttpError(502, "Local Ollama returned invalid criterion coverage");
-    if (criterion.maximumPoints !== null && item.suggestedPoints > criterion.maximumPoints) {
-      throw new HttpError(502, "Local Ollama awarded points above a criterion maximum");
-    }
+    if (!criterion || received.has(item.criterionId)) throw new RetryableModelError("Local Ollama returned invalid criterion coverage");
     received.add(item.criterionId);
   }
-  if (received.size !== expected.size) throw new HttpError(502, "Local Ollama omitted rubric criteria");
-  const results: GradeCriterionResult[] = suggestions.map((item) => ({
+  if (received.size !== expected.size) throw new RetryableModelError("Local Ollama omitted rubric criteria");
+  return suggestions;
+}
+
+function clampSuggestion(
+  item: z.infer<typeof suggestionSchema>,
+  maximumPoints: number | null
+): GradeCriterionResult {
+  const clamped = maximumPoints !== null && item.suggestedPoints > maximumPoints;
+  const suggestedPoints = clamped ? maximumPoints : item.suggestedPoints;
+  return {
     ...item,
+    suggestedPoints,
+    reviewRequired: item.reviewRequired || clamped,
     approvedRating: item.suggestedRating,
-    approvedPoints: item.suggestedPoints,
+    approvedPoints: suggestedPoints,
     approvedExplanation: item.explanation
-  }));
+  };
+}
+
+router.post("/", async (request, response) => {
+  const body = requestSchema.parse(request.body);
+  let suggestions: z.infer<typeof suggestionSchema>[] | null = null;
+  let lastRetryable: RetryableModelError | null = null;
+  for (let attempt = 1; attempt <= MAX_GRADING_ATTEMPTS; attempt++) {
+    try {
+      suggestions = await requestModelSuggestions(body);
+      break;
+    } catch (error) {
+      if (error instanceof RetryableModelError) {
+        lastRetryable = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (!suggestions) {
+    throw new HttpError(502, `${lastRetryable?.message ?? "Local Ollama could not produce a valid result"}. This can happen with larger rubrics; try again.`);
+  }
+  const maxByCriterion = new Map(body.rubric.criteria.map((item) => [item.sourceId, item.maximumPoints]));
+  const results: GradeCriterionResult[] = suggestions.map((item) =>
+    clampSuggestion(item, maxByCriterion.get(item.criterionId) ?? null));
   const persisted = await persistResults(body, results);
   response.set("Cache-Control", "no-store").json({
     model: config.ollamaModel,
