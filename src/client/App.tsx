@@ -98,6 +98,9 @@ export default function App() {
   const [model, setModel] = useState("");
   const [notice, setNotice] = useState<Notice>(null);
   const [busy, setBusy] = useState("");
+  const [activeTab, setActiveTab] = useState<"grading" | "discussions">("grading");
+  const [discussionPost, setDiscussionPost] = useState("");
+  const [discussionReply, setDiscussionReply] = useState("");
 
   const selectedCourse = courses.find((course) => course.id === courseId);
   const selectedRubric = rubricIndex === "" ? undefined : rubrics[Number(rubricIndex)];
@@ -372,6 +375,24 @@ export default function App() {
     try { await navigator.clipboard.writeText(text); setNotice({ kind: "success", text: "Canvas-ready comment copied." }); }
     catch { setNotice({ kind: "error", text: "Clipboard access was blocked. Select and copy the approved comment manually." }); }
   }
+
+  async function analyzeDiscussion() {
+    if (!discussionPost.trim()) return;
+    setBusy("discussion"); setDiscussionReply("");
+    try {
+      const response = await api<{ model: string; response: string }>(
+        "/api/discussions/analyze", jsonInit("POST", { postText: discussionPost.trim() }),
+      );
+      setDiscussionReply(response.response); setModel(response.model);
+      setNotice({ kind: "success", text: "Draft professor response generated. Review and edit before posting." });
+    } catch (error) { showError(error); } finally { setBusy(""); }
+  }
+
+  async function copyDiscussionReply() {
+    if (!discussionReply) return;
+    try { await navigator.clipboard.writeText(discussionReply); setNotice({ kind: "success", text: "Response copied." }); }
+    catch { setNotice({ kind: "error", text: "Clipboard access was blocked. Select and copy the response manually." }); }
+  }
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -384,12 +405,30 @@ export default function App() {
       </header>
 
       <main>
+        <nav className="tab-bar" role="tablist" aria-label="Workspaces">
+          <button type="button" role="tab" aria-selected={activeTab === "grading"} className={`tab ${activeTab === "grading" ? "active" : ""}`} onClick={() => setActiveTab("grading")}>Grading</button>
+          <button type="button" role="tab" aria-selected={activeTab === "discussions"} className={`tab ${activeTab === "discussions" ? "active" : ""}`} onClick={() => setActiveTab("discussions")}>Discussions</button>
+        </nav>
         {notice && <div className={`notice ${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div>}
         {health && !health.database.configured && (
           <div className="notice info" role="status"><strong>Database is not configured.</strong> Fixture grading and document extraction remain available, but courses and saved edits require a database.</div>
         )}
 
-        <section className="panel" aria-labelledby="course-heading">
+        {activeTab === "discussions" && <section className="panel" aria-labelledby="discussion-heading">
+          <div className="section-heading"><div><span className="step">D</span><h2 id="discussion-heading">Discussion response</h2></div><p>Paste a student's weekly discussion post and generate a brief professor-style reply.</p></div>
+          <label htmlFor="discussion-post">Student discussion post</label>
+          <textarea id="discussion-post" rows={10} maxLength={20000} value={discussionPost} placeholder="Paste the student's discussion post here." onChange={(event) => { setDiscussionPost(event.target.value); setDiscussionReply(""); }} />
+          <small>{discussionPost.length.toLocaleString()} / 20,000 characters. Content stays in memory and is not stored.</small>
+          <button className="primary large" type="button" disabled={!discussionPost.trim() || busy === "discussion"} onClick={() => void analyzeDiscussion()}>{busy === "discussion" ? "Analyzing locally…" : "Analyze"}</button>
+          {discussionReply && <div className="discussion-reply">
+            <div className="results-title"><div><p className="eyebrow">Draft — review before posting</p><h3>Suggested professor response</h3></div><span className="model-chip">Model: {model}</span></div>
+            <textarea id="discussion-reply" rows={4} maxLength={2000} value={discussionReply} onChange={(event) => setDiscussionReply(event.target.value)} />
+            <div className="button-row"><button type="button" onClick={() => void copyDiscussionReply()}>Copy response</button></div>
+            <small>The tool suggests only. Review and edit before posting to Canvas.</small>
+          </div>}
+        </section>}
+
+        {activeTab === "grading" && <><section className="panel" aria-labelledby="course-heading">
           <div className="section-heading"><div><span className="step">1</span><h2 id="course-heading">Course workspace</h2></div><p>Select the course context used for rosters and saved grading.</p></div>
           <div className="two-column">
             <div>
@@ -539,6 +578,7 @@ export default function App() {
             </article>;
           })}
         </section>}
+        </>}
       </main>
       <footer>Course Grading Assist · Local processing · Faculty approval required before posting</footer>
     </div>
