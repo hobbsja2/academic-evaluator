@@ -419,7 +419,10 @@ export default function App() {
           <label htmlFor="discussion-post">Student discussion post</label>
           <textarea id="discussion-post" rows={10} maxLength={20000} value={discussionPost} placeholder="Paste the student's discussion post here." onChange={(event) => { setDiscussionPost(event.target.value); setDiscussionReply(""); }} />
           <small>{discussionPost.length.toLocaleString()} / 20,000 characters. Content stays in memory and is not stored.</small>
-          <button className="primary large" type="button" disabled={!discussionPost.trim() || busy === "discussion"} onClick={() => void analyzeDiscussion()}>{busy === "discussion" ? "Analyzing locally…" : "Analyze"}</button>
+          <div className="button-row">
+            <button className="primary large" type="button" disabled={!discussionPost.trim() || busy === "discussion"} onClick={() => void analyzeDiscussion()}>{busy === "discussion" ? "Analyzing locally…" : "Analyze"}</button>
+            <button className="secondary large" type="button" disabled={(!discussionPost && !discussionReply) || busy === "discussion"} onClick={() => { setDiscussionPost(""); setDiscussionReply(""); }}>Clear</button>
+          </div>
           {discussionReply && <div className="discussion-reply">
             <div className="results-title"><div><p className="eyebrow">Draft — review before posting</p><h3>Suggested professor response</h3></div><span className="model-chip">Model: {model}</span></div>
             <textarea id="discussion-reply" rows={4} maxLength={2000} value={discussionReply} onChange={(event) => setDiscussionReply(event.target.value)} />
