@@ -41,6 +41,18 @@ export interface NormalizedRubric {
   source: "extension" | "fixture";
 }
 
+export interface InstructorProfile {
+  courseId: string;
+  resumeText: string | null;
+  courseIntroduction: string | null;
+  updatedAt: string | null;
+}
+
+export interface AnnouncementDraft {
+  model: string;
+  announcement: string;
+}
+
 export interface GradeCriterionResult {
   resultId?: string;
   criterionId: string;

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { Course, GradeCriterionResult, NormalizedRubric } from "../shared/types";
+import { AnnouncementsPanel } from "./AnnouncementsPanel";
+import { ApiError, api, jsonInit } from "./api-client";
 
 type Health = {
   status: string;
@@ -27,29 +29,6 @@ const emptyCourse: CourseForm = {
   code: "", section: "", title: "", term: "", startDate: "", endDate: "", canvasCourseId: "", canvasUrl: "",
 };
 
-class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
-}
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(url, init);
-  } catch {
-    throw new ApiError(0, "The local application service could not be reached.");
-  }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { error?: string };
-    const fallback = response.status === 503
-      ? "This feature needs a configured database or local service. You can continue with non-persisted workflows."
-      : `Request failed (${response.status})`;
-    throw new ApiError(response.status, body.error || fallback);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
-}
-function jsonInit(method: string, body: unknown): RequestInit {
-  return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-}
 function labelForRubric(rubric: NormalizedRubric): string {
   return rubric.rubricTitle || rubric.assignmentName || "Untitled rubric";
 }
@@ -98,7 +77,7 @@ export default function App() {
   const [model, setModel] = useState("");
   const [notice, setNotice] = useState<Notice>(null);
   const [busy, setBusy] = useState("");
-  const [activeTab, setActiveTab] = useState<"grading" | "discussions">("grading");
+  const [activeTab, setActiveTab] = useState<"grading" | "discussions" | "announcements">("grading");
   const [discussionPost, setDiscussionPost] = useState("");
   const [discussionReply, setDiscussionReply] = useState("");
 
@@ -389,9 +368,12 @@ export default function App() {
   }
 
   async function copyDiscussionReply() {
-    if (!discussionReply) return;
-    try { await navigator.clipboard.writeText(discussionReply); setNotice({ kind: "success", text: "Response copied." }); }
+    const text = discussionReply.trim();
+    if (!text || busy === "copy-reply") return;
+    setBusy("copy-reply");
+    try { await navigator.clipboard.writeText(text); setNotice({ kind: "success", text: "Response copied." }); }
     catch { setNotice({ kind: "error", text: "Clipboard access was blocked. Select and copy the response manually." }); }
+    finally { setBusy(""); }
   }
   return (
     <div className="app-shell">
@@ -408,11 +390,21 @@ export default function App() {
         <nav className="tab-bar" role="tablist" aria-label="Workspaces">
           <button type="button" role="tab" aria-selected={activeTab === "grading"} className={`tab ${activeTab === "grading" ? "active" : ""}`} onClick={() => setActiveTab("grading")}>Grading</button>
           <button type="button" role="tab" aria-selected={activeTab === "discussions"} className={`tab ${activeTab === "discussions" ? "active" : ""}`} onClick={() => setActiveTab("discussions")}>Discussions</button>
+          <button type="button" role="tab" aria-selected={activeTab === "announcements"} className={`tab ${activeTab === "announcements" ? "active" : ""}`} onClick={() => setActiveTab("announcements")}>Announcements</button>
         </nav>
         {notice && <div className={`notice ${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div>}
         {health && !health.database.configured && (
           <div className="notice info" role="status"><strong>Database is not configured.</strong> Fixture grading and document extraction remain available, but courses and saved edits require a database.</div>
         )}
+
+        {activeTab === "announcements" && <AnnouncementsPanel
+          courseId={courseId}
+          courseLabel={selectedCourse ? `${selectedCourse.code} section ${selectedCourse.section}` : null}
+          busy={busy}
+          setBusy={setBusy}
+          onNotice={setNotice}
+          onError={showError}
+        />}
 
         {activeTab === "discussions" && <section className="panel" aria-labelledby="discussion-heading">
           <div className="section-heading"><div><span className="step">D</span><h2 id="discussion-heading">Discussion response</h2></div><p>Paste a student's weekly discussion post and generate a brief professor-style reply.</p></div>
@@ -426,7 +418,7 @@ export default function App() {
           {discussionReply && <div className="discussion-reply">
             <div className="results-title"><div><p className="eyebrow">Draft — review before posting</p><h3>Suggested professor response</h3></div><span className="model-chip">Model: {model}</span></div>
             <textarea id="discussion-reply" rows={4} maxLength={2000} value={discussionReply} onChange={(event) => setDiscussionReply(event.target.value)} />
-            <div className="button-row"><button type="button" onClick={() => void copyDiscussionReply()}>Copy response</button></div>
+            <div className="button-row"><button type="button" disabled={busy === "copy-reply"} onClick={() => void copyDiscussionReply()}>Copy response</button></div>
             <small>The tool suggests only. Review and edit before posting to Canvas.</small>
           </div>}
         </section>}

@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS criterion_results (
   UNIQUE (grading_run_id, criterion_id)
 );
 
+-- Reference material the professor reuses across every weekly announcement.
+-- Scoped to a course so it cascades with the existing purge_after retention window.
+CREATE TABLE IF NOT EXISTS instructor_profiles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  course_id uuid NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  resume_text text,
+  course_introduction text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (course_id)
+);
+
 CREATE INDEX IF NOT EXISTS courses_purge_after_idx ON courses (purge_after);
 CREATE INDEX IF NOT EXISTS assignments_course_idx ON assignments (course_id);
 CREATE INDEX IF NOT EXISTS students_course_idx ON students (course_id);

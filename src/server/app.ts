@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { announcementsRouter } from "./announcements.js";
 import { config } from "./config.js";
 import { coursesRouter } from "./courses.js";
 import { discussionsRouter } from "./discussions.js";
@@ -45,5 +46,6 @@ app.use("/api/rubrics", rubricsRouter);
 app.use("/api/documents", extractionRouter);
 app.use("/api/grading", gradingRouter);
 app.use("/api/discussions", discussionsRouter);
+app.use("/api/announcements", announcementsRouter);
 app.use(notFound);
 app.use(safeErrorHandler);
