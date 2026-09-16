@@ -40,6 +40,12 @@ small { display: block; color: var(--muted); margin-top: .4rem; line-height: 1.4
 .dot { width: .55rem; height: .55rem; border-radius: 50%; background: #aeb9c3; box-shadow: 0 0 0 3px #ffffff14; }
 .dot.ok { background: #5ed19a; } .dot.off { background: #f3ac66; }
 main { max-width: 1180px; margin: 1.4rem auto 3rem; padding: 0 1.25rem; }
+.tab-bar { display: flex; gap: .4rem; margin-bottom: 1rem; border-bottom: 1px solid var(--line); }
+.tab { background: transparent; color: var(--muted); border: 0; border-bottom: 3px solid transparent; border-radius: 0; padding: .6rem 1rem; font-weight: 750; }
+.tab:hover:not(.active) { background: transparent; color: var(--navy); }
+.tab.active { color: var(--navy); border-bottom-color: var(--navy); }
+.discussion-reply { margin-top: 1.2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.discussion-reply textarea { margin-top: .2rem; }
 .notice { border: 1px solid; border-radius: 8px; padding: .85rem 1rem; margin-bottom: 1rem; line-height: 1.45; }
 .notice.success { color: #165f3c; background: #edf9f2; border-color: #a9d9bf; }
 .notice.error { color: #8d2020; background: #fff1f1; border-color: #e3adad; }
