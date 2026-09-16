@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import type { Course, GradeCriterionResult, NormalizedRubric } from "../shared/types";
+import type {
+  AttachmentFinding, AttachmentSnapshot, Course, GradeCriterionResult, NormalizedRubric
+} from "../shared/types";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
+import { AttachmentsPanel } from "./AttachmentsPanel";
 import { ApiError, api, jsonInit } from "./api-client";
 
 type Health = {
@@ -73,6 +76,9 @@ export default function App() {
   const [pseudonym, setPseudonym] = useState("");
   const [apaEnabled, setApaEnabled] = useState(false);
   const [results, setResults] = useState<GradeCriterionResult[]>([]);
+  const [attachmentFindings, setAttachmentFindings] = useState<AttachmentFinding[]>([]);
+  const [gradingRunId, setGradingRunId] = useState<string | null>(null);
+  const [appliedAttachments, setAppliedAttachments] = useState<AttachmentSnapshot[]>([]);
   const [history, setHistory] = useState<HistoryRun[]>([]);
   const [model, setModel] = useState("");
   const [notice, setNotice] = useState<Notice>(null);
@@ -83,6 +89,9 @@ export default function App() {
 
   const selectedCourse = courses.find((course) => course.id === courseId);
   const selectedRubric = rubricIndex === "" ? undefined : rubrics[Number(rubricIndex)];
+  // Persisted rubrics carry the local assignment UUID; memory and fixture rubrics
+  // carry a Canvas identifier instead, which attachments cannot key on.
+  const attachmentAssignmentId = selectedRubric?.id ? selectedRubric.assignmentId : null;
   const extractionStats = useMemo(() => submissionText ? {
     characters: submissionText.length,
     words: submissionText.trim().split(/\s+/).filter(Boolean).length,
@@ -316,7 +325,8 @@ export default function App() {
 
   async function gradeSubmission() {
     if (!selectedRubric || !submissionText) return;
-    setBusy("grading"); setResults([]);
+    setBusy("grading"); setResults([]); setAttachmentFindings([]);
+    setGradingRunId(null); setAppliedAttachments([]);
     const context = selectedRubric.id && selectedCourse && pseudonym.trim()
       ? { courseId: selectedCourse.id, rubricId: selectedRubric.id, pseudonym: pseudonym.trim() }
       : undefined;
@@ -325,11 +335,47 @@ export default function App() {
         ...selectedRubric,
         assignmentDirections: assignmentDirections.trim() || null,
       };
-      const response = await api<{ model: string; gradingRunId: string | null; results: GradeCriterionResult[] }>(
-        "/api/grading", jsonInit("POST", { rubric: rubricForGrading, submissionText, apaEnabled, context }),
+      const response = await api<{
+        model: string; gradingRunId: string | null; results: GradeCriterionResult[];
+        appliedAttachments: AttachmentSnapshot[];
+        attachmentFindings: AttachmentFinding[];
+      }>(
+        "/api/grading", jsonInit("POST", {
+          rubric: rubricForGrading, submissionText, apaEnabled, context,
+          assignmentId: attachmentAssignmentId,
+        }),
       );
       setResults(response.results); setModel(response.model);
-      setNotice({ kind: "success", text: context ? "Suggestions generated and saved as a reviewable run." : "Suggestions generated for review. This run was not persisted." });
+      setAttachmentFindings(response.attachmentFindings ?? []);
+      setGradingRunId(response.gradingRunId);
+      setAppliedAttachments(response.appliedAttachments ?? []);
+      const applied = response.appliedAttachments?.length
+        ? ` Applied ${response.appliedAttachments.length} assignment file(s): ${response.appliedAttachments.map((item) => item.fileName).join(", ")}.`
+        : "";
+      setNotice({ kind: "success", text: (context ? "Suggestions generated and saved as a reviewable run." : "Suggestions generated for review. This run was not persisted.") + applied });
+    } catch (error) { showError(error); } finally { setBusy(""); }
+  }
+
+  // Persists a run that was generated without a pseudonym, so reviewing first and
+  // deciding to keep it later does not require re-running local inference.
+  async function saveRun() {
+    if (!selectedRubric?.id || !selectedCourse || !pseudonym.trim() || !results.length) return;
+    setBusy("save-run");
+    try {
+      const response = await api<{ gradingRunId: string; results: GradeCriterionResult[] }>(
+        "/api/grading/runs", jsonInit("POST", {
+          courseId: selectedCourse.id,
+          rubricId: selectedRubric.id,
+          pseudonym: pseudonym.trim(),
+          apaEnabled,
+          assignmentDirections: assignmentDirections.trim() || null,
+          attachments: appliedAttachments,
+          results,
+        }),
+      );
+      setResults(response.results);
+      setGradingRunId(response.gradingRunId);
+      setNotice({ kind: "success", text: `Run saved for ${pseudonym.trim()}. Individual criteria can now be approved and saved.` });
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
@@ -536,13 +582,22 @@ export default function App() {
           </div>
         </section>
 
+        <AttachmentsPanel
+          assignmentId={attachmentAssignmentId}
+          assignmentName={selectedRubric?.assignmentName ?? null}
+          busy={busy}
+          setBusy={setBusy}
+          onNotice={setNotice}
+          onError={showError}
+        />
+
         <section className="panel" aria-labelledby="grade-heading">
-          <div className="section-heading"><div><span className="step">4</span><h2 id="grade-heading">Generate suggestions</h2></div><p>Identify the pseudonym, set the APA policy, and review every result before use.</p></div>
+          <div className="section-heading"><div><span className="step">5</span><h2 id="grade-heading">Generate suggestions</h2></div><p>Set the APA policy and review every result before use. A pseudonym is only needed to save a run.</p></div>
           <p className="scoring-note"><strong>Flexible scoring:</strong> Rubric rating points are anchors, not exclusive values. Suggested and professor-approved points may fall between anchors, from zero through each criterion maximum.</p>
           <div className="grade-controls">
             <div>
               {unlockedMappings.length > 0 && <><label htmlFor="identity-selector">Unlocked identity (memory only)</label><select id="identity-selector" value={unlockedMappings.some((mapping) => mapping.pseudonym === pseudonym) ? pseudonym : ""} onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }}><option value="">Choose an identity label</option>{unlockedMappings.map((mapping) => <option key={mapping.pseudonym} value={mapping.pseudonym}>{mapping.identityLabel}</option>)}</select><small>Identity labels stay only in memory. Selecting one fills the pseudonym below.</small></>}
-              <label htmlFor="pseudonym">Student pseudonym</label><input id="pseudonym" value={pseudonym} maxLength={120} placeholder="COURSE-SECTION-SXXXXXXXX" onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }} /><small>Manual pseudonym entry remains available. A pseudonym is required only to persist a run against a stored rubric and course.</small><button type="button" className="secondary history-button" disabled={!selectedCourse || !pseudonym.trim() || busy === "history"} onClick={() => void loadHistory()}>{busy === "history" ? "Searching…" : "Find saved records"}</button>
+              <label htmlFor="pseudonym">Student pseudonym</label><input id="pseudonym" value={pseudonym} maxLength={120} placeholder="COURSE-SECTION-SXXXXXXXX" onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }} /><small>Optional. Leave this blank to generate suggestions without saving; you can supply a pseudonym afterwards to keep the run. Saving requires the pseudonym to exist in this course's imported roster.</small><button type="button" className="secondary history-button" disabled={!selectedCourse || !pseudonym.trim() || busy === "history"} onClick={() => void loadHistory()}>{busy === "history" ? "Searching…" : "Find saved records"}</button>
             </div>
             <fieldset><legend>APA evaluation</legend><label className="switch-row"><input type="checkbox" checked={apaEnabled} onChange={(event) => setApaEnabled(event.target.checked)} /><span>Evaluate APA requirements</span></label><p className={apaEnabled ? "enabled-note" : "disabled-note"}>{apaEnabled ? "Enabled: APA applies only where the rubric explicitly supports it." : "Disabled: the grader must not deduct points, lower ratings, criticize, or mention APA."}</p></fieldset>
           </div>
@@ -557,6 +612,43 @@ export default function App() {
           </div>}
         </section>
 
+        {attachmentFindings.length > 0 && <section className="panel" aria-labelledby="findings-heading">
+          <div className="section-heading">
+            <div><span className="step">!</span><h2 id="findings-heading">Assignment file compliance</h2></div>
+            <p>Checks against the attached template and instruction files.</p>
+          </div>
+          <div className="privacy-warning">
+            <p><strong>Advisory only.</strong> The local model both misses violations and reports requirements as met when they are not. Confirm every item against the submission yourself before acting on it, and treat a "Met" result as unverified.</p>
+          </div>
+          {attachmentFindings.map((finding, index) => (
+            <div className="history-result" key={`${index}-${finding.requirement.slice(0, 24)}`}>
+              <span className={`badge ${finding.satisfied ? "ready" : "review"}`}>{finding.satisfied ? "Reported met" : "Reported not met"}</span>
+              <strong> {finding.requirement}</strong>
+              <p>{finding.note}</p>
+            </div>
+          ))}
+        </section>}
+
+        {results.length > 0 && !gradingRunId && <section className="panel" aria-labelledby="save-run-heading">
+          <div className="section-heading">
+            <div><span className="step">6</span><h2 id="save-run-heading">Keep this run</h2></div>
+            <p>Optional. Suggestions below are in memory only until saved.</p>
+          </div>
+          {selectedRubric?.id ? <>
+            <label htmlFor="save-run-pseudonym">Student pseudonym</label>
+            <input id="save-run-pseudonym" value={pseudonym} maxLength={120} placeholder="COURSE-SECTION-SXXXXXXXX"
+              onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }} />
+            <small>Must already exist in this course's imported roster. Saving also unlocks per-criterion approval below.</small>
+            <div className="button-row">
+              <button className="primary" type="button"
+                disabled={!selectedCourse || !pseudonym.trim() || busy === "save-run"}
+                onClick={() => void saveRun()}>
+                {busy === "save-run" ? "Saving…" : "Save run for this pseudonym"}
+              </button>
+            </div>
+          </> : <p className="warning-text">This run used a fixture or unsaved rubric, so it cannot be persisted. Capture the rubric from Canvas to enable saving.</p>}
+        </section>}
+
         {results.length > 0 && <section className="results" aria-labelledby="results-heading">
           <div className="results-title"><div><p className="eyebrow">Human review required</p><h2 id="results-heading">Criterion results</h2></div><span className="model-chip">Model: {model}</span></div>
           {results.map((result, index) => {
@@ -568,7 +660,7 @@ export default function App() {
               <div className="approval-editor"><h4>Approved Canvas feedback</h4><div className="form-grid"><Field label="Approved rating" required value={result.approvedRating} onChange={(value) => updateResult(index, { approvedRating: value })} /><Field label="Approved points" type="number" min={0} step="any" required value={String(result.approvedPoints)} max={criterion?.maximumPoints ?? undefined} onChange={(value) => updateResult(index, { approvedPoints: Number(value) })} /></div>
                 <label htmlFor={`explanation-${index}`}>Approved comment</label><textarea id={`explanation-${index}`} rows={4} maxLength={1500} value={result.approvedExplanation} onChange={(event) => updateResult(index, { approvedExplanation: event.target.value })} />
                 <div className="button-row"><button type="button" onClick={() => void copyComment(result)}>Copy Canvas-ready comment</button><button type="button" className="secondary" disabled={!result.resultId || busy === `save-${index}`} onClick={() => void saveResult(index)}>{busy === `save-${index}` ? "Saving…" : "Save approved edits"}</button></div>
-                {!result.resultId && <small>This result is not persisted. Use a stored rubric, selected course, and valid pseudonym to enable saved edits.</small>}
+                {!result.resultId && <small>Not saved yet. Use <strong>Keep this run</strong> above to store it against a pseudonym; approved edits can then be saved without regrading.</small>}
               </div>
             </article>;
           })}

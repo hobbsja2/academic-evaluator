@@ -41,6 +41,31 @@ export interface NormalizedRubric {
   source: "extension" | "fixture";
 }
 
+export type AttachmentRole = "template" | "instructions" | "reference";
+
+export interface AssignmentAttachment {
+  id: string;
+  assignmentId: string;
+  fileName: string;
+  role: AttachmentRole;
+  includeInGrading: boolean;
+  requirements: string | null;
+  extractedCharacters: number;
+  updatedAt: string;
+}
+
+export interface AttachmentFinding {
+  requirement: string;
+  satisfied: boolean;
+  note: string;
+}
+
+export interface AttachmentSnapshot {
+  fileName: string;
+  role: AttachmentRole;
+  requirements: string;
+}
+
 export interface InstructorProfile {
   courseId: string;
   resumeText: string | null;

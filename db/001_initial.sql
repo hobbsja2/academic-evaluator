@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS grading_runs (
 );
 
 ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS assignment_directions text;
+-- Snapshot of the attachment requirements actually used by this run, so a grade
+-- stays explainable after a template is edited or replaced.
+ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS attachment_requirements jsonb;
 
 CREATE TABLE IF NOT EXISTS criterion_results (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -97,6 +100,24 @@ CREATE TABLE IF NOT EXISTS criterion_results (
   approved_points numeric NOT NULL,
   approved_explanation text NOT NULL,
   UNIQUE (grading_run_id, criterion_id)
+);
+
+-- Files embedded with the assignment instructions: required templates and
+-- supplemental instruction documents. Anchored to the assignment rather than a
+-- rubric version, because each extension import creates a new rubric version and
+-- would otherwise orphan these. "requirements" is the bounded, professor-editable
+-- text actually injected at grading time; extracted_text is kept for reference.
+CREATE TABLE IF NOT EXISTS assignment_attachments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  assignment_id uuid NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+  file_name text NOT NULL,
+  role text NOT NULL CHECK (role IN ('template', 'instructions', 'reference')),
+  include_in_grading boolean NOT NULL DEFAULT true,
+  extracted_text text NOT NULL,
+  requirements text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (assignment_id, file_name)
 );
 
 -- Reference material the professor reuses across every weekly announcement.
@@ -115,3 +136,4 @@ CREATE INDEX IF NOT EXISTS courses_purge_after_idx ON courses (purge_after);
 CREATE INDEX IF NOT EXISTS assignments_course_idx ON assignments (course_id);
 CREATE INDEX IF NOT EXISTS students_course_idx ON students (course_id);
 CREATE INDEX IF NOT EXISTS grading_runs_course_idx ON grading_runs (course_id);
+CREATE INDEX IF NOT EXISTS assignment_attachments_assignment_idx ON assignment_attachments (assignment_id);
