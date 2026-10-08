@@ -1,3 +1,4 @@
+import type { PoolClient } from "@neondatabase/serverless";
 import { Router } from "express";
 import { z } from "zod";
 import { assignment13FixtureMetadata, assignment13Rubric } from "../fixtures/assignment-1-3-rubric.js";
@@ -87,10 +88,37 @@ function pendingDirectionsKey(localCourseId: string, assignmentId: string | null
   return assignmentId ? `${localCourseId}\0${assignmentId}` : null;
 }
 
+/** Order-sensitive fingerprint of a rubric's gradeable content. */
+function rubricSignature(criteria: NormalizedRubric["criteria"]): string {
+  return JSON.stringify(criteria.map((criterion) => [
+    criterion.sourceId, criterion.name, criterion.description, criterion.maximumPoints,
+    criterion.ratings.map((rating) => [rating.sourceId, rating.label, rating.description, rating.points])
+  ]));
+}
+
+async function storedRubricSignature(client: PoolClient, rubricId: string): Promise<string> {
+  const criteria = await client.query(`SELECT id, source_id AS "sourceId", name, description,
+      maximum_points::float8 AS "maximumPoints" FROM rubric_criteria
+    WHERE rubric_id = $1 ORDER BY position`, [rubricId]);
+  const shaped: NormalizedRubric["criteria"] = [];
+  for (const criterion of criteria.rows) {
+    const ratings = await client.query(`SELECT source_id AS "sourceId", label, description,
+        points::float8 AS points FROM rubric_ratings WHERE criterion_id = $1 ORDER BY position`, [criterion.id]);
+    shaped.push({
+      sourceId: String(criterion.sourceId),
+      name: criterion.name,
+      description: criterion.description,
+      maximumPoints: criterion.maximumPoints,
+      ratings: ratings.rows
+    });
+  }
+  return rubricSignature(shaped);
+}
+
 async function persistRubric(
   rubric: NormalizedRubric,
   localCourseId: string
-): Promise<{ persisted: true; rubricId: string; version: number }> {
+): Promise<{ persisted: true; rubricId: string; version: number; reused: boolean }> {
   try {
   const database = getDatabase();
   if (!database) throw new HttpError(503, "Database is not configured");
@@ -103,6 +131,25 @@ async function persistRubric(
       ON CONFLICT (course_id, title) DO UPDATE SET
         canvas_assignment_id = COALESCE(EXCLUDED.canvas_assignment_id, assignments.canvas_assignment_id),
         title = EXCLUDED.title RETURNING id`, [localCourseId, rubric.assignmentId, rubric.assignmentName]);
+    // Capturing from each student's SpeedGrader page re-sends the same rubric, so an
+    // unchanged rubric reuses its version instead of cluttering the version list.
+    const latest = await client.query(`SELECT id, version FROM rubrics
+      WHERE assignment_id = $1 ORDER BY version DESC LIMIT 1`, [assignments.rows[0].id]);
+    if (latest.rows[0]) {
+      const existingSignature = await storedRubricSignature(client, String(latest.rows[0].id));
+      if (existingSignature === rubricSignature(rubric.criteria)) {
+        if (rubric.assignmentDirections) {
+          await client.query(`UPDATE rubrics SET assignment_directions = $1 WHERE id = $2`,
+            [rubric.assignmentDirections, latest.rows[0].id]);
+        }
+        return {
+          persisted: true,
+          rubricId: String(latest.rows[0].id),
+          version: Number(latest.rows[0].version),
+          reused: true
+        };
+      }
+    }
     const versions = await client.query(`SELECT COALESCE(MAX(version), 0)::int + 1 AS version
       FROM rubrics WHERE assignment_id = $1`, [assignments.rows[0].id]);
     const version = Number(versions.rows[0].version);
@@ -125,7 +172,7 @@ async function persistRubric(
           rating.points, ratingPosition]);
       }
     }
-    return { persisted: true, rubricId: String(inserted.rows[0].id), version };
+    return { persisted: true, rubricId: String(inserted.rows[0].id), version, reused: false };
   });
   } catch (error) {
     throw error;

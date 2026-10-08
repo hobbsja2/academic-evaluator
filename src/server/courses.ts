@@ -32,7 +32,9 @@ const updateBody = z.object({
 const selectColumns = `id, code, section, title, term,
   start_date::text AS "startDate", end_date::text AS "endDate",
   purge_after::text AS "purgeAfter", canvas_course_id AS "canvasCourseId",
-  canvas_url AS "canvasUrl", created_at::text AS "createdAt"`;
+  canvas_url AS "canvasUrl", grading_policy AS "gradingPolicy",
+  created_at::text AS "createdAt"`;
+const MAX_GRADING_POLICY_LENGTH = 4_000;
 const activeCourseColumns = `id, code, section, title, term`;
 
 export type ActiveCourseSelection = {
@@ -100,9 +102,7 @@ router.post("/", async (request, response) => {
   const result = await database.query(`INSERT INTO courses
     (code, section, title, term, start_date, end_date, canvas_course_id, canvas_url)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    RETURNING id, code, section, title, term, start_date::text AS "startDate",
-      end_date::text AS "endDate", purge_after::text AS "purgeAfter",
-      canvas_course_id AS "canvasCourseId", canvas_url AS "canvasUrl", created_at::text AS "createdAt"`,
+    RETURNING ${selectColumns}`,
   [body.code, body.section, body.title ?? null, body.term, body.startDate, body.endDate,
     body.canvasCourseId ?? null, body.canvasUrl ?? null]);
   response.status(201).json(result.rows[0]);
@@ -120,9 +120,7 @@ router.patch("/:id", async (request, response) => {
   const result = await database.query(`UPDATE courses SET code = $1, section = $2,
       title = $3, term = $4, start_date = $5, end_date = $6, canvas_course_id = $7,
       canvas_url = $8 WHERE id = $9
-    RETURNING id, code, section, title, term, start_date::text AS "startDate",
-      end_date::text AS "endDate", purge_after::text AS "purgeAfter",
-      canvas_course_id AS "canvasCourseId", canvas_url AS "canvasUrl", created_at::text AS "createdAt"`,
+    RETURNING ${selectColumns}`,
   [body.code, body.section, body.title ?? null, body.term, body.startDate, body.endDate,
     body.canvasCourseId ?? null, body.canvasUrl ?? null, id]);
   response.json(result.rows[0]);
@@ -135,13 +133,27 @@ router.put("/:id", async (request, response) => {
   const result = await database.query(`UPDATE courses SET code = $1, section = $2,
       title = $3, term = $4, start_date = $5, end_date = $6, canvas_course_id = $7,
       canvas_url = $8 WHERE id = $9
-    RETURNING id, code, section, title, term, start_date::text AS "startDate",
-      end_date::text AS "endDate", purge_after::text AS "purgeAfter",
-      canvas_course_id AS "canvasCourseId", canvas_url AS "canvasUrl", created_at::text AS "createdAt"`,
+    RETURNING ${selectColumns}`,
   [body.code, body.section, body.title ?? null, body.term, body.startDate, body.endDate,
     body.canvasCourseId ?? null, body.canvasUrl ?? null, id]);
   if (!result.rows[0]) throw new HttpError(404, "Course not found");
   response.json(result.rows[0]);
+});
+
+router.put("/:id/grading-policy", async (request, response) => {
+  try {
+    const id = idSchema.parse(request.params.id);
+    const { gradingPolicy } = z.object({
+      gradingPolicy: z.string().trim().max(MAX_GRADING_POLICY_LENGTH).nullable()
+    }).parse(request.body);
+    const database = requireDatabase();
+    const result = await database.query(`UPDATE courses SET grading_policy = $1
+      WHERE id = $2 RETURNING ${selectColumns}`, [gradingPolicy || null, id]);
+    if (!result.rows[0]) throw new HttpError(404, "Course not found");
+    response.set("Cache-Control", "no-store").json(result.rows[0]);
+  } catch (error) {
+    throw error;
+  }
 });
 
 router.delete("/:id", async (request, response) => {

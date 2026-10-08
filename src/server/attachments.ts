@@ -9,8 +9,8 @@ const MAX_EXTRACTED_TEXT_LENGTH = 200_000;
 const MAX_REQUIREMENTS_LENGTH = 4_000;
 
 // Per-attachment ceiling on what reaches the grading prompt. Grading runs with
-// num_ctx 8192 (~32k characters for rubric, directions, submission and output
-// combined), so attachment text has to stay small or it crowds out the submission.
+// num_ctx OLLAMA_GRADING_NUM_CTX (default 16384, shared by rubric, directions,
+// submission and output), so attachment text has to stay small or it crowds out the submission.
 const MAX_SNAPSHOT_LENGTH = 2_000;
 
 const router = Router();
