@@ -111,6 +111,12 @@ fieldset legend { padding: 0 .3rem; }
 .result-header h3 { margin: .25rem 0 0; font-size: 1rem; }
 .badge { flex: 0 0 auto; border-radius: 999px; padding: .3rem .6rem; font-size: .69rem; font-weight: 800; }
 .badge.review { color: #854207; background: #fff0d6; } .badge.ready { color: #17613c; background: #e6f7ee; }
+.badge.ai-high { color: #8d2020; background: #fdeaea; }
+.ai-use-score { display: flex; align-items: center; gap: .8rem; }
+.ai-use-score strong { color: var(--navy); font-size: 1.6rem; }
+.ai-use-summary { color: #465467; font-size: .87rem; line-height: 1.5; margin: .7rem 0 0; }
+.ai-use-indicators { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: .8rem 0 0; }
+@media (max-width: 780px) { .ai-use-indicators { grid-template-columns: 1fr; } }
 .suggestion-grid { display: grid; grid-template-columns: repeat(3, 1fr); background: #f7fafc; border-bottom: 1px solid var(--line); }
 .suggestion-grid div { display: flex; flex-direction: column; gap: .15rem; padding: .8rem 1.2rem; border-right: 1px solid var(--line); }
 .suggestion-grid div:last-child { border-right: 0; }

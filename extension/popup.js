@@ -6,12 +6,47 @@ const captureCountsElement = document.querySelector('#capture-counts');
 const completenessElement = document.querySelector('#completeness');
 const importUrl = 'http://127.0.0.1:8787/api/rubrics/import';
 const directionsImportUrl = 'http://127.0.0.1:8787/api/rubrics/directions/import';
+const discussionSubmissionUrl = 'http://127.0.0.1:8787/api/discussions/submission';
 const activeCourseUrl = 'http://127.0.0.1:8787/api/courses/active';
 let activeCourse = null;
 
 function setStatus(message, kind = '') {
   statusElement.textContent = message;
   statusElement.className = kind;
+}
+
+const MODE_STORAGE_KEY = 'captureMode';
+const MODE_LABELS = {
+  both: 'rubric and discussion entries',
+  rubric: 'the rubric only',
+  discussion: 'discussion entries only'
+};
+
+function selectedMode() {
+  const checked = document.querySelector('input[name="capture-mode"]:checked');
+  const value = checked?.value;
+  return value === 'rubric' || value === 'discussion' ? value : 'both';
+}
+
+// Only the chosen mode is remembered. No captured content is ever stored here.
+function restoreMode() {
+  let stored = null;
+  try {
+    stored = window.localStorage.getItem(MODE_STORAGE_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored !== 'rubric' && stored !== 'discussion' && stored !== 'both') return;
+  const option = document.querySelector(`input[name="capture-mode"][value="${stored}"]`);
+  if (option) option.checked = true;
+}
+
+function persistMode() {
+  try {
+    window.localStorage.setItem(MODE_STORAGE_KEY, selectedMode());
+  } catch {
+    // A blocked storage quota must not prevent capturing.
+  }
 }
 
 function clearSummary() {
@@ -94,7 +129,7 @@ async function refreshActiveCourse() {
   return course;
 }
 
-async function captureActiveTab() {
+async function captureActiveTab(mode) {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id || !/^https?:/.test(tab.url || '')) {
@@ -106,7 +141,8 @@ async function captureActiveTab() {
     });
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async () => globalThis.captureCanvasRubric()
+      func: async (selectedMode) => globalThis.captureCanvasRubric(selectedMode),
+      args: [mode]
     });
     if (!result?.ok) {
       throw new Error(result?.error ||
@@ -160,6 +196,62 @@ async function importDirections(data, selectedCourseToken) {
   }
 }
 
+async function importDiscussionSubmission(data, selectedCourseToken) {
+  try {
+    const response = await fetch(discussionSubmissionUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...data, selectedCourseToken })
+    });
+    const payload = await jsonResponse(response);
+    if (!response.ok || payload?.staged !== true) {
+      const serverError = typeof payload?.error === 'string' ? payload.error.trim() : '';
+      throw new Error(serverError || `Discussion capture failed (${response.status}).`);
+    }
+    return payload;
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error('Could not stage the discussion submission locally.');
+  }
+}
+
+function renderDiscussionStaged(payload, diagnostics, rubricPayload, rubricNote) {
+  const initialPosts = safeCount(diagnostics?.initialPostCount);
+  const replies = safeCount(diagnostics?.replyCount);
+  const criteria = safeCount(diagnostics?.parsedCriterionCount);
+  const directionsCaptured = diagnostics?.assignmentDirectionsCaptured === true;
+  const threadEntries = safeCount(diagnostics?.threadEntryCount);
+  captureCountsElement.textContent =
+    `${initialPosts} initial post${initialPosts === 1 ? '' : 's'} · ` +
+    `${replies} ${replies === 1 ? 'reply' : 'replies'} · ` +
+    `${criteria} rubric criteria · ` +
+    `${threadEntries} thread entries scanned · ` +
+    `assignment directions ${directionsCaptured ? 'captured' : 'not found'}`;
+  const warnings = [];
+  if (!initialPosts) warnings.push('no initial post was found');
+  if (!replies) warnings.push('no peer replies were found');
+  if (diagnostics?.threadTruncated === true) {
+    warnings.push('the thread was too large to read completely, so entries may be missing');
+  }
+  if (rubricNote) warnings.push(rubricNote);
+  if (warnings.length) {
+    completenessElement.textContent = `Verification required: ${warnings.join('; ')}`;
+    completenessElement.className = 'warning';
+  } else {
+    completenessElement.textContent = 'Rubric saved and submission staged. Load it in the local application, then generate suggestions.';
+    completenessElement.className = 'complete';
+  }
+  summaryElement.hidden = false;
+  const target = payload?.course ? courseLabel(payload.course) : 'the selected local course';
+  const rubricSuffix = rubricPayload?.persisted
+    ? ` Rubric saved as version ${rubricPayload.version}.`
+    : '';
+  setStatus(
+    `Discussion submission staged for ${target}. Expires in ${safeCount(payload?.expiresInMinutes) || 30} minutes.${rubricSuffix}`,
+    'success'
+  );
+}
+
 function renderDirectionsStaged(payload, diagnostics) {
   captureCountsElement.textContent = 'Assignment directions captured · rubric pending';
   completenessElement.textContent = 'Within 30 minutes, select Preview Rubric in Canvas, then run Capture and import again.';
@@ -170,9 +262,13 @@ function renderDirectionsStaged(payload, diagnostics) {
   if (diagnostics) diagnostics.assignmentDirectionsCaptured = true;
 }
 
-function renderImportResult(payload, diagnostics) {
+function renderImportResult(payload, diagnostics, discussionNote) {
   if (payload.directionsMerged && diagnostics) diagnostics.assignmentDirectionsCaptured = true;
   renderSummary(diagnostics);
+  if (discussionNote) {
+    completenessElement.textContent = `${completenessElement.textContent} ${discussionNote}`.trim();
+    completenessElement.className = 'warning';
+  }
   if (payload.persisted) {
     const version = Number.isFinite(payload.version) ? ` as rubric version ${payload.version}` : '';
     const merged = payload.directionsMerged ? ' Staged assignment directions were merged.' : '';
@@ -183,7 +279,18 @@ function renderImportResult(payload, diagnostics) {
 async function captureAndImport() {
   try {
     const selectedCourse = await refreshActiveCourse();
-    const result = await captureActiveTab();
+    const result = await captureActiveTab(selectedMode());
+    if (result.captureType === 'discussion-submission') {
+      setStatus('Staging the discussion response and replies locally…');
+      const payload = await importDiscussionSubmission(result.data, selectedCourse.token);
+      let rubricPayload = null;
+      if (result.data.rubricImport) {
+        setStatus('Saving the SpeedGrader rubric…');
+        rubricPayload = await importRubric(result.data.rubricImport, selectedCourse.token);
+      }
+      renderDiscussionStaged(payload, result.diagnostics, rubricPayload, result.rubricNote);
+      return;
+    }
     if (result.captureType === 'directions-only') {
       setStatus('Staging assignment directions locally…');
       const payload = await importDirections(result.data, selectedCourse.token);
@@ -192,11 +299,21 @@ async function captureAndImport() {
     }
     setStatus(`Importing rubric into ${courseLabel(selectedCourse)}…`);
     const payload = await importRubric(result.data, selectedCourse.token);
-    renderImportResult(payload, result.diagnostics);
+    renderImportResult(payload, result.diagnostics, result.discussionNote);
   } catch (error) {
     if (error instanceof Error) throw error;
     throw new Error('Capture failed.');
   }
+}
+
+restoreMode();
+
+for (const option of document.querySelectorAll('input[name="capture-mode"]')) {
+  option.addEventListener('change', () => {
+    persistMode();
+    clearSummary();
+    setStatus('');
+  });
 }
 
 void refreshActiveCourse().catch((error) => {
@@ -206,7 +323,7 @@ void refreshActiveCourse().catch((error) => {
 captureButton.addEventListener('click', async () => {
   captureButton.disabled = true;
   clearSummary();
-  setStatus('Reading the Canvas rubric and assignment directions…');
+  setStatus(`Reading ${MODE_LABELS[selectedMode()]} from this page…`);
   try {
     await captureAndImport();
   } catch (error) {

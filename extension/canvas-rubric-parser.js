@@ -662,6 +662,11 @@
       missingMaximumPointsCount: 0,
       invalidPointCount: 0,
       assignmentDirectionsCaptured: false,
+      initialPostCount: 0,
+      replyCount: 0,
+      threadEntryCount: 0,
+      ownEntryCount: 0,
+      threadTruncated: false,
       totalSource: 'missing'
     };
   }
@@ -788,7 +793,322 @@
     );
   }
 
-  async function capture() {
+  const MAX_ENTRY_LENGTH = 6000;
+  // A whole-section thread is easily hundreds of entries. This ceiling only guards
+  // against a pathological response; it must never be small enough to truncate a
+  // normal class discussion, or a student's own entries can be silently dropped.
+  const MAX_TRAVERSED_ENTRIES = 5000;
+  const MAX_OWN_ENTRIES = 60;
+
+  // Current Canvas builds put the selected student in the query string
+  // (?student_id=123); older builds put it in the URL fragment as JSON. Support both.
+  function speedGraderStudentId() {
+    try {
+      const fromQuery = new URLSearchParams(location.search || '').get('student_id');
+      if (fromQuery && fromQuery.trim()) return fromQuery.trim();
+    } catch {
+      // Fall through to the fragment form.
+    }
+    const raw = (location.hash || '').replace(/^#/, '');
+    if (!raw) return null;
+    let decoded = raw;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = raw;
+    }
+    try {
+      const parsed = JSON.parse(decoded);
+      const value = jsonObject(parsed)?.student_id ?? jsonObject(parsed)?.studentId;
+      if (value !== null && value !== undefined && String(value).trim()) return String(value).trim();
+    } catch {
+      // Older SpeedGrader builds use a non-JSON fragment.
+    }
+    const match = decoded.match(/student_id["'\s:=]+(\d+)/i);
+    return match ? match[1] : null;
+  }
+
+  async function fetchCanvasJson(endpoint) {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      mode: 'same-origin',
+      credentials: 'same-origin',
+      redirect: 'error',
+      headers: { Accept: 'application/json' }
+    });
+    if (!response.ok) return null;
+    return response.json();
+  }
+
+  async function fetchDiscussionTopicId(urlDetails) {
+    const endpoint = new URL(
+      `/api/v1/courses/${encodeURIComponent(urlDetails.courseId)}` +
+      `/assignments/${encodeURIComponent(urlDetails.assignmentId)}`,
+      urlDetails.origin
+    );
+    const assignment = jsonObject(await fetchCanvasJson(endpoint));
+    if (!assignment) {
+      return { topicId: null, assignmentName: null, assignmentDirections: null, dueAt: null };
+    }
+    const topic = jsonObject(assignment.discussion_topic);
+    return {
+      topicId: topic ? jsonId(topic.id, null) : null,
+      assignmentName: preservedString(assignment.name),
+      assignmentDirections: boundedPlainText(assignment.description),
+      // Drives the deterministic timeliness check; lock_at is the fallback when a
+      // discussion has no explicit due date.
+      dueAt: preservedString(assignment.due_at)
+        || preservedString(topic?.lock_at)
+        || preservedString(assignment.lock_at)
+    };
+  }
+
+  /** Flattens the nested discussion view into one list, recording each entry's parent. */
+  function flattenEntries(entries, parentId, collected) {
+    if (!Array.isArray(entries)) return collected;
+    for (const value of entries) {
+      if (collected.length >= MAX_TRAVERSED_ENTRIES) {
+        collected.truncated = true;
+        return collected;
+      }
+      const entry = jsonObject(value);
+      if (!entry) continue;
+      const id = jsonId(entry.id, null);
+      if (id && !entry.deleted) {
+        collected.push({
+          id,
+          parentId: parentId ?? jsonId(entry.parent_id, null),
+          userId: jsonId(entry.user_id, null),
+          createdAt: preservedString(entry.created_at),
+          message: htmlToPlainText(entry.message)
+        });
+      }
+      // Recurse even when this entry was skipped, so nested replies are not lost.
+      flattenEntries(entry.replies, id, collected);
+    }
+    return collected;
+  }
+
+  /** Canvas may split a topic between the rendered view and later entries. */
+  function collectThreadEntries(view) {
+    const collected = [];
+    flattenEntries(view.view, null, collected);
+    flattenEntries(view.new_entries, null, collected);
+    const seen = new Set();
+    const unique = collected.filter((entry) => {
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    });
+    unique.truncated = collected.truncated === true;
+    return unique;
+  }
+
+  /**
+   * Assigns stable pseudonymous labels to every author except the graded student,
+   * so reply context never carries another student's real name off the page.
+   */
+  function peerLabels(entries, studentId) {
+    const labels = new Map();
+    let next = 1;
+    for (const entry of entries) {
+      const author = String(entry.userId ?? '').trim();
+      if (!author || author === studentId || labels.has(author)) continue;
+      labels.set(author, `Peer ${next}`);
+      next += 1;
+    }
+    return labels;
+  }
+
+  function clipEntry(value) {
+    if (!value) return null;
+    return value.length > MAX_ENTRY_LENGTH ? `${value.slice(0, MAX_ENTRY_LENGTH)} [truncated]` : value;
+  }
+
+  function buildSubmission(entries, studentId) {
+    const target = String(studentId).trim();
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const labels = peerLabels(entries, target);
+    const own = entries
+      .filter((entry) => String(entry.userId ?? '').trim() === target && entry.message)
+      .slice(0, MAX_OWN_ENTRIES);
+    const initialPosts = [];
+    const replies = [];
+    for (const entry of own) {
+      // Classify on whether the entry itself has a parent. Looking the parent up
+      // first would misfile a reply as an initial post when the parent is missing.
+      if (!entry.parentId) {
+        initialPosts.push({ text: clipEntry(entry.message), createdAt: entry.createdAt });
+        continue;
+      }
+      const parent = byId.get(entry.parentId) ?? null;
+      const parentAuthor = parent ? String(parent.userId ?? '').trim() : '';
+      replies.push({
+        text: clipEntry(entry.message),
+        createdAt: entry.createdAt,
+        replyingTo: !parent
+          ? 'a peer'
+          : parentAuthor === target
+            ? 'their own earlier post'
+            : (labels.get(parentAuthor) || 'a peer'),
+        parentExcerpt: parent ? clipEntry(parent.message)?.slice(0, 400) ?? null : null
+      });
+    }
+    return { initialPosts, replies, ownEntryCount: own.length };
+  }
+
+  async function captureDiscussionSubmission(urlDetails, studentId, diagnostics) {
+    const topic = await fetchDiscussionTopicId(urlDetails);
+    if (!topic.topicId) {
+      return failure('This assignment is not a graded discussion, so no response or replies were captured.', diagnostics);
+    }
+    const endpoint = new URL(
+      `/api/v1/courses/${encodeURIComponent(urlDetails.courseId)}` +
+      `/discussion_topics/${encodeURIComponent(topic.topicId)}/view`,
+      urlDetails.origin
+    );
+    const view = jsonObject(await fetchCanvasJson(endpoint));
+    if (!view) {
+      return failure('Canvas did not return the discussion thread. Your account may lack permission to read full discussion data.', diagnostics);
+    }
+    const entries = collectThreadEntries(view);
+    if (!entries.length) {
+      return failure('The discussion thread returned no readable entries.', diagnostics);
+    }
+    const submission = buildSubmission(entries, studentId);
+    diagnostics.threadTruncated = entries.truncated === true;
+    if (!submission.initialPosts.length && !submission.replies.length) {
+      return failure(
+        `No entries by this student were found among the ${entries.length} entries Canvas returned for this topic. ` +
+        'Confirm the correct student is selected in SpeedGrader.',
+        diagnostics
+      );
+    }
+    diagnostics.assignmentDirectionsCaptured = Boolean(topic.assignmentDirections);
+    diagnostics.initialPostCount = submission.initialPosts.length;
+    diagnostics.replyCount = submission.replies.length;
+    diagnostics.threadEntryCount = entries.length;
+    diagnostics.ownEntryCount = submission.ownEntryCount;
+    return {
+      ok: true,
+      captureType: 'discussion-submission',
+      data: {
+        courseId: urlDetails.courseId,
+        assignmentId: urlDetails.assignmentId,
+        courseName: namesFromPage().courseName,
+        assignmentName: topic.assignmentName || namesFromPage().assignmentName,
+        assignmentDirections: topic.assignmentDirections,
+        dueAt: topic.dueAt,
+        submission,
+        sourceUrl: urlDetails.sourceUrl,
+        capturedAt: new Date().toISOString()
+      },
+      diagnostics
+    };
+  }
+
+  /**
+   * Builds the payload the local rubric importer expects, so a SpeedGrader capture
+   * can carry the rubric alongside the discussion submission. A discussion's own
+   * page has no rubric, so SpeedGrader is the only place to read it.
+   */
+  function rubricImportPayload(rubricResult, assignmentName) {
+    if (!rubricResult?.ok || !Array.isArray(rubricResult.data?.criteria)) return null;
+    return {
+      courseId: rubricResult.data.courseId,
+      assignmentId: rubricResult.data.assignmentId,
+      courseName: rubricResult.data.courseName ?? null,
+      assignmentName: assignmentName || rubricResult.data.assignmentName || null,
+      assignmentDirections: rubricResult.data.assignmentDirections ?? null,
+      rubricTitle: rubricResult.data.rubricTitle ?? null,
+      criteria: rubricResult.data.criteria,
+      totalPoints: rubricResult.data.totalPoints ?? null,
+      sourceUrl: rubricResult.data.sourceUrl ?? null,
+      capturedAt: rubricResult.data.capturedAt ?? new Date().toISOString()
+    };
+  }
+
+  function mergeRubricDiagnostics(target, source) {
+    if (!source) return target;
+    target.parsedCriterionCount = source.parsedCriterionCount;
+    target.ratingCount = source.ratingCount;
+    target.malformedCriterionCount = source.malformedCriterionCount;
+    target.missingRatingCount = source.missingRatingCount;
+    target.missingRatingDescriptionCount = source.missingRatingDescriptionCount;
+    target.missingMaximumPointsCount = source.missingMaximumPointsCount;
+    target.invalidPointCount = source.invalidPointCount;
+    target.rubricSelector = source.rubricSelector;
+    target.totalSource = source.totalSource;
+    return target;
+  }
+
+  async function captureSpeedGraderDiscussion(urlDetails, studentId, rubricResult, includeRubric) {
+    const diagnostics = createDiagnostics('canvas-discussion-api');
+    let discussionResult;
+    try {
+      discussionResult = await captureDiscussionSubmission(urlDetails, studentId, diagnostics);
+    } catch {
+      discussionResult = failure('The discussion thread could not be read from this page.', diagnostics);
+    }
+    if (!discussionResult?.ok) {
+      // Keep a readable rubric usable, but say why no submission was staged.
+      if (rubricResult?.ok) {
+        rubricResult.discussionNote = discussionResult?.error
+          || 'No discussion response or replies were captured.';
+        return rubricResult;
+      }
+      return discussionResult;
+    }
+    const assignmentName = discussionResult.data.assignmentName;
+    discussionResult.data.rubricImport = includeRubric
+      ? rubricImportPayload(rubricResult, assignmentName)
+      : null;
+    if (includeRubric && !discussionResult.data.rubricImport) {
+      discussionResult.rubricNote = 'No readable rubric was found on this page. Open the rubric in SpeedGrader and capture again if you still need it.';
+    }
+    mergeRubricDiagnostics(discussionResult.diagnostics, rubricResult?.ok ? rubricResult.diagnostics : null);
+    if (!discussionResult.data.assignmentDirections && rubricResult?.ok) {
+      discussionResult.data.assignmentDirections = rubricResult.data.assignmentDirections ?? null;
+    }
+    discussionResult.diagnostics.assignmentDirectionsCaptured =
+      Boolean(discussionResult.data.assignmentDirections);
+    return discussionResult;
+  }
+
+  function normalizeMode(value) {
+    return value === 'rubric' || value === 'discussion' ? value : 'both';
+  }
+
+  /** True when SpeedGrader is hiding the student id behind anonymous grading. */
+  function speedGraderIsAnonymous() {
+    try {
+      return Boolean(new URLSearchParams(location.search || '').get('anonymous_id'));
+    } catch {
+      return false;
+    }
+  }
+
+  function missingStudentError() {
+    return speedGraderIsAnonymous()
+      ? 'SpeedGrader is in anonymous grading mode, so Canvas does not expose which student is selected. Turn off anonymous grading for this assignment to capture discussion entries.'
+      : "Open a student's SpeedGrader page for a graded discussion before capturing discussion entries.";
+  }
+
+  async function capture(requestedMode) {
+    const mode = normalizeMode(requestedMode);
+    const urlDetails = safeUrlDetails(location.href);
+    const studentId = speedGraderStudentId();
+
+    // Discussion-only skips the rubric entirely, so repeat captures across a section
+    // never re-send or re-version the rubric.
+    if (mode === 'discussion') {
+      const discussionDiagnostics = createDiagnostics('canvas-discussion-api');
+      if (!studentId || !urlDetails.courseId || !urlDetails.assignmentId || !urlDetails.origin) {
+        return failure(missingStudentError(), discussionDiagnostics);
+      }
+      return captureSpeedGraderDiscussion(urlDetails, studentId, null, false);
+    }
+
     const domDiagnostics = createDiagnostics();
     let domResult;
     try {
@@ -796,7 +1116,6 @@
     } catch {
       domResult = failure('Could not read the visible rubric.', domDiagnostics);
     }
-    const urlDetails = safeUrlDetails(location.href);
     if (domResult.ok) {
       if (!domResult.data.assignmentDirections && urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
         const apiDiagnostics = createDiagnostics('canvas-assignment-api');
@@ -810,8 +1129,13 @@
           // The readable DOM rubric remains usable when optional direction retrieval fails.
         }
       }
-      return domResult;
     }
+    // On a SpeedGrader page the selected student's discussion entries are also
+    // available, and SpeedGrader is the only place a discussion rubric is rendered.
+    if (mode === 'both' && studentId && urlDetails.courseId && urlDetails.assignmentId && urlDetails.origin) {
+      return captureSpeedGraderDiscussion(urlDetails, studentId, domResult.ok ? domResult : null, true);
+    }
+    if (domResult.ok) return domResult;
     return captureFallback(urlDetails, domDiagnostics);
   }
 

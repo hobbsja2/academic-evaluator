@@ -9,6 +9,7 @@ export interface Course {
   purgeAfter: string;
   canvasCourseId: string | null;
   canvasUrl: string | null;
+  gradingPolicy: string | null;
   createdAt: string;
 }
 
@@ -54,10 +55,60 @@ export interface AssignmentAttachment {
   updatedAt: string;
 }
 
+export interface DiscussionTimeliness {
+  timeZone: string;
+  dueAt: string | null;
+  onTimeDeadline: string | null;
+  initialPostAt: string | null;
+  initialOnTime: boolean | null;
+  replyDates: Array<string | null>;
+  repliesDistributed: boolean | null;
+}
+
+export interface StagedDiscussionSubmission {
+  assignmentName: string | null;
+  assignmentDirections: string | null;
+  capturedAt: string;
+  expiresAt: string;
+  initialPostCount: number;
+  replyCount: number;
+  characters: number;
+  timeliness: DiscussionTimeliness;
+  text: string;
+}
+
 export interface AttachmentFinding {
   requirement: string;
   satisfied: boolean;
   note: string;
+}
+
+/**
+ * Advisory estimate of how much AI generation shaped a submission. 0 means more
+ * likely than not written solely by a human; 10 means heavy AI use throughout.
+ * It never changes criterion points.
+ */
+export interface AiUseAssessment {
+  score: number;
+  aiIndicators: AiUseIndicator[];
+  humanIndicators: AiUseIndicator[];
+  summary: string;
+  /** Indicators dropped because their quote was not found in the submission. */
+  unverifiedCount: number;
+  /** True when the score was lowered because no AI indicator could be verified. */
+  scoreCapped: boolean;
+  /** Stock chatbot phrases found by the server's deterministic scan. */
+  stockPhrases: string[];
+  /** Distinct stock phrases per 1,000 words. */
+  phraseDensity: number;
+  /** True when the phrase density raised the model's score to a minimum. */
+  phraseFloorApplied: boolean;
+}
+
+/** One observation, anchored to a verbatim quote from the submission. */
+export interface AiUseIndicator {
+  quote: string;
+  observation: string;
 }
 
 export interface AttachmentSnapshot {

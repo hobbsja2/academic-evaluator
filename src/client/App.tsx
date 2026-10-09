@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type {
-  AttachmentFinding, AttachmentSnapshot, Course, GradeCriterionResult, NormalizedRubric
+  AiUseAssessment, AttachmentFinding, AttachmentSnapshot, Course, GradeCriterionResult, NormalizedRubric,
+  StagedDiscussionSubmission
 } from "../shared/types";
+import { AiUsePanel, aiUseBand } from "./AiUsePanel";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { ApiError, api, jsonInit } from "./api-client";
@@ -21,6 +23,7 @@ type Notice = { kind: "success" | "error" | "info"; text: string } | null;
 type HistoryRun = {
   id: string; createdAt: string; apaEnabled: boolean; model: string;
   assignmentName: string; rubricTitle: string | null; version: number;
+  aiUseScore: number | null;
   results: Array<{ criterionName: string | null; approvedRating: string; approvedPoints: number; approvedExplanation: string }>;
 };
 
@@ -77,8 +80,11 @@ export default function App() {
   const [apaEnabled, setApaEnabled] = useState(false);
   const [results, setResults] = useState<GradeCriterionResult[]>([]);
   const [attachmentFindings, setAttachmentFindings] = useState<AttachmentFinding[]>([]);
+  const [aiUseAssessment, setAiUseAssessment] = useState<AiUseAssessment | null>(null);
   const [gradingRunId, setGradingRunId] = useState<string | null>(null);
   const [appliedAttachments, setAppliedAttachments] = useState<AttachmentSnapshot[]>([]);
+  const [stagedDiscussion, setStagedDiscussion] = useState<StagedDiscussionSubmission | null>(null);
+  const [gradingPolicy, setGradingPolicy] = useState("");
   const [history, setHistory] = useState<HistoryRun[]>([]);
   const [model, setModel] = useState("");
   const [notice, setNotice] = useState<Notice>(null);
@@ -116,6 +122,10 @@ export default function App() {
   }, [selectedCourse?.id, selectedCourse?.endDate]);
 
   useEffect(() => {
+    setGradingPolicy(selectedCourse?.gradingPolicy ?? "");
+  }, [selectedCourse?.id, selectedCourse?.gradingPolicy]);
+
+  useEffect(() => {
     setAssignmentDirections(selectedRubric?.assignmentDirections ?? "");
   }, [rubricIndex, selectedRubric?.assignmentDirections]);
 
@@ -147,6 +157,7 @@ export default function App() {
     setResults([]);
     setHistory([]);
     setPseudonym("");
+    setStagedDiscussion(null);
     if (announce) setBusy("course-selection");
     try {
       if (!targetCourseId) {
@@ -301,6 +312,53 @@ export default function App() {
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
+  // Pulls the discussion response and peer replies staged by the Canvas extension
+  // from a SpeedGrader page. Held in server memory only, so it expires.
+  async function loadStagedDiscussion(announce = true) {
+    if (!selectedCourse) return;
+    if (announce) setBusy("discussion-capture");
+    try {
+      const params = new URLSearchParams({ courseId: selectedCourse.id });
+      const { submission } = await api<{ submission: StagedDiscussionSubmission | null }>(
+        `/api/discussions/submission?${params}`);
+      setStagedDiscussion(submission);
+      if (!announce) return;
+      if (!submission) {
+        setNotice({
+          kind: "info",
+          text: `No staged capture found for ${selectedCourse.code} section ${selectedCourse.section}. Open a student's SpeedGrader page for a graded discussion and click the extension. The extension stages against the course marked as the Canvas extension target, so confirm this is that course.`
+        });
+        return;
+      }
+      setNotice({
+        kind: "success",
+        text: `Found a capture with ${submission.initialPostCount} initial post(s) and ${submission.replyCount} repl${submission.replyCount === 1 ? "y" : "ies"}. Load it to grade.`
+      });
+    } catch (error) { showError(error); } finally { if (announce) setBusy(""); }
+  }
+
+  function applyStagedDiscussion() {
+    if (!stagedDiscussion) return;
+    setSubmissionText(stagedDiscussion.text);
+    setDocumentName(`${stagedDiscussion.assignmentName || "Discussion"} (SpeedGrader capture)`);
+    setResults([]); setAttachmentFindings([]); setAiUseAssessment(null); setGradingRunId(null); setAppliedAttachments([]);
+    if (stagedDiscussion.assignmentDirections && !assignmentDirections.trim()) {
+      setAssignmentDirections(stagedDiscussion.assignmentDirections);
+    }
+    setNotice({ kind: "success", text: "Discussion capture loaded as the submission. Generate suggestions when ready; a pseudonym is only needed to save." });
+  }
+
+  async function saveGradingPolicy() {
+    if (!selectedCourse) return;
+    setBusy("grading-policy");
+    try {
+      const updated = await api<Course>(`/api/courses/${selectedCourse.id}/grading-policy`,
+        jsonInit("PUT", { gradingPolicy: gradingPolicy.trim() || null }));
+      setCourses((current) => current.map((course) => course.id === updated.id ? updated : course));
+      setNotice({ kind: "success", text: "Course grading policy saved. It applies to every run for this course." });
+    } catch (error) { showError(error); } finally { setBusy(""); }
+  }
+
   async function extractDocument(file: File | null) {
     if (!file) return;
     setBusy("document"); setSubmissionText(""); setDocumentName(file.name); setResults([]);
@@ -325,7 +383,7 @@ export default function App() {
 
   async function gradeSubmission() {
     if (!selectedRubric || !submissionText) return;
-    setBusy("grading"); setResults([]); setAttachmentFindings([]);
+    setBusy("grading"); setResults([]); setAttachmentFindings([]); setAiUseAssessment(null);
     setGradingRunId(null); setAppliedAttachments([]);
     const context = selectedRubric.id && selectedCourse && pseudonym.trim()
       ? { courseId: selectedCourse.id, rubricId: selectedRubric.id, pseudonym: pseudonym.trim() }
@@ -339,14 +397,17 @@ export default function App() {
         model: string; gradingRunId: string | null; results: GradeCriterionResult[];
         appliedAttachments: AttachmentSnapshot[];
         attachmentFindings: AttachmentFinding[];
+        aiUseAssessment: AiUseAssessment | null;
       }>(
         "/api/grading", jsonInit("POST", {
           rubric: rubricForGrading, submissionText, apaEnabled, context,
           assignmentId: attachmentAssignmentId,
+          courseId: selectedCourse?.id ?? null,
         }),
       );
       setResults(response.results); setModel(response.model);
       setAttachmentFindings(response.attachmentFindings ?? []);
+      setAiUseAssessment(response.aiUseAssessment ?? null);
       setGradingRunId(response.gradingRunId);
       setAppliedAttachments(response.appliedAttachments ?? []);
       const applied = response.appliedAttachments?.length
@@ -371,6 +432,7 @@ export default function App() {
           assignmentDirections: assignmentDirections.trim() || null,
           attachments: appliedAttachments,
           results,
+          aiUseAssessment,
         }),
       );
       setResults(response.results);
@@ -483,6 +545,21 @@ export default function App() {
                 <p className="scoring-note"><strong>Canvas extension target:</strong> {extensionCourseId === selectedCourse.id ? "Active. New captures will be saved only to this course." : "Activating this course…"}</p>
                 <dl><div><dt>Term</dt><dd>{selectedCourse.term}</dd></div><div><dt>Dates</dt><dd>{formatDate(selectedCourse.startDate)}–{formatDate(selectedCourse.endDate)}</dd></div><div><dt>Automatic purge</dt><dd>{formatDate(selectedCourse.purgeAfter)}</dd></div></dl>
                 <p className="warning-text">Course-related student and grading data is scheduled for purge after this date.</p>
+                <div className="directions-editor">
+                  <label htmlFor="grading-policy">Course grading policy</label>
+                  <textarea id="grading-policy" rows={4} maxLength={4000} value={gradingPolicy}
+                    placeholder="For example: properly cited corporate websites and materials count as proper external sources."
+                    onChange={(event) => setGradingPolicy(event.target.value)} />
+                  <small>Applied to every grading run for this course. It settles how existing rubric criteria are interpreted; it cannot add criteria or change point maximums.</small>
+                  <div className="directions-actions">
+                    <button type="button" className="secondary"
+                      disabled={busy === "grading-policy" || gradingPolicy === (selectedCourse.gradingPolicy ?? "")}
+                      onClick={() => void saveGradingPolicy()}>
+                      {busy === "grading-policy" ? "Saving…" : "Save grading policy"}
+                    </button>
+                    <span>{selectedCourse.gradingPolicy ? "A policy is active for this course." : "No policy set."}</span>
+                  </div>
+                </div>
                 <div className="retention-editor">
                   <label htmlFor="extended-end-date">Extend or correct course end date</label>
                   <div className="button-row">
@@ -576,6 +653,35 @@ export default function App() {
               <label htmlFor="document-file">Student document</label>
               <input id="document-file" type="file" accept=".doc,.docx,.pdf,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => void extractDocument(event.target.files?.[0] || null)} />
               <small>.doc, .docx, or .pdf · Maximum 15 MB. Content stays in memory and is never written to localStorage.</small>
+              <div className="directions-editor">
+                <h4>Graded discussion</h4>
+                <p>For a discussion, capture the student's SpeedGrader page with the extension instead of uploading a file. The response and peer replies are held in server memory for 30 minutes and never stored.</p>
+                <div className="button-row">
+                  <button type="button" className="secondary" disabled={!selectedCourse || busy === "discussion-capture"}
+                    onClick={() => void loadStagedDiscussion()}>
+                    {busy === "discussion-capture" ? "Checking…" : "Check for SpeedGrader capture"}
+                  </button>
+                  {stagedDiscussion && <button type="button" className="primary" onClick={() => applyStagedDiscussion()}>
+                    Load as submission
+                  </button>}
+                </div>
+                {stagedDiscussion && <>
+                  <small role="status">
+                    {stagedDiscussion.assignmentName || "Discussion"} · {stagedDiscussion.initialPostCount} initial post(s) · {stagedDiscussion.replyCount} repl{stagedDiscussion.replyCount === 1 ? "y" : "ies"} · {stagedDiscussion.characters.toLocaleString()} characters · expires {new Date(stagedDiscussion.expiresAt).toLocaleTimeString()}
+                    {stagedDiscussion.replyCount === 0 && " · No peer replies were captured; verify in SpeedGrader before grading a peer-response criterion."}
+                  </small>
+                  <div className="stats" aria-label="Computed timeliness">
+                    <div><strong>{stagedDiscussion.timeliness.initialOnTime === null ? "?" : stagedDiscussion.timeliness.initialOnTime ? "On time" : "Late"}</strong><span>initial response</span></div>
+                    <div><strong>{stagedDiscussion.timeliness.repliesDistributed === null ? "?" : stagedDiscussion.timeliness.repliesDistributed ? "Spread" : "Same day"}</strong><span>reply dates</span></div>
+                    <div><strong>{stagedDiscussion.timeliness.replyDates.filter(Boolean).length}</strong><span>dated replies</span></div>
+                    <p>
+                      Deadline used: {stagedDiscussion.timeliness.onTimeDeadline || "unavailable"} ({stagedDiscussion.timeliness.timeZone}).
+                      Initial response posted {stagedDiscussion.timeliness.initialPostAt || "unknown"}.
+                      {!stagedDiscussion.timeliness.dueAt && " Canvas published no due date, so timeliness could not be derived."}
+                    </p>
+                  </div>
+                </>}
+              </div>
               {busy === "document" && <p className="loading" role="status">Extracting document…</p>}
               {extractionStats && <div className="stats" aria-label="Extraction statistics"><div><strong>{extractionStats.words.toLocaleString()}</strong><span>words</span></div><div><strong>{extractionStats.characters.toLocaleString()}</strong><span>characters</span></div><div><strong>~{extractionStats.pages}</strong><span>pages</span></div><p>{documentName} extracted. Full student content is intentionally not displayed.</p></div>}
             </div>
@@ -606,7 +712,7 @@ export default function App() {
           {history.length > 0 && <div className="history-list" aria-label="Saved grading records">
             <h3>Saved records for {pseudonym}</h3>
             {history.map((run) => <details key={run.id}>
-              <summary><strong>{run.assignmentName}</strong><span>{new Date(run.createdAt).toLocaleString()} · {run.results.reduce((sum, item) => sum + item.approvedPoints, 0)} approved points</span></summary>
+              <summary><strong>{run.assignmentName}</strong><span>{new Date(run.createdAt).toLocaleString()} · {run.results.reduce((sum, item) => sum + item.approvedPoints, 0)} approved points{run.aiUseScore !== null && ` · AI use ${run.aiUseScore}/10 (${aiUseBand(run.aiUseScore).label.toLowerCase()})`}</span></summary>
               <div>{run.results.map((item, index) => <div className="history-result" key={`${run.id}-${index}`}><strong>{item.criterionName || `Criterion ${index + 1}`}: {item.approvedRating} · {item.approvedPoints}</strong><p>{item.approvedExplanation}</p></div>)}</div>
             </details>)}
           </div>}
@@ -628,6 +734,8 @@ export default function App() {
             </div>
           ))}
         </section>}
+
+        {results.length > 0 && aiUseAssessment && <AiUsePanel assessment={aiUseAssessment} />}
 
         {results.length > 0 && !gradingRunId && <section className="panel" aria-labelledby="save-run-heading">
           <div className="section-heading">

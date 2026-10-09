@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS rubrics (
 
 ALTER TABLE rubrics ADD COLUMN IF NOT EXISTS assignment_directions text;
 
+-- Standing grading policy the professor sets for a course, such as which kinds of
+-- source count as acceptable. Trusted professor instruction, unlike the assignment
+-- directions captured from Canvas.
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS grading_policy text;
+
 CREATE TABLE IF NOT EXISTS rubric_criteria (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   rubric_id uuid NOT NULL REFERENCES rubrics(id) ON DELETE CASCADE,
@@ -85,6 +90,12 @@ ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS assignment_directions text;
 -- Snapshot of the attachment requirements actually used by this run, so a grade
 -- stays explainable after a template is edited or replaced.
 ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS attachment_requirements jsonb;
+-- Advisory AI-use estimate from the grading model: 0 = more likely than not written
+-- solely by the student, 10 = heavy AI generation. Never affects criterion points.
+-- ai_use_details holds { aiIndicators, humanIndicators, summary }.
+ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS ai_use_score smallint
+  CHECK (ai_use_score BETWEEN 0 AND 10);
+ALTER TABLE grading_runs ADD COLUMN IF NOT EXISTS ai_use_details jsonb;
 
 CREATE TABLE IF NOT EXISTS criterion_results (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
