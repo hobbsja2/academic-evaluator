@@ -78,6 +78,7 @@ export default function App() {
   const [submissionText, setSubmissionText] = useState("");
   const [pseudonym, setPseudonym] = useState("");
   const [apaEnabled, setApaEnabled] = useState(false);
+  const [gradingBackend, setGradingBackend] = useState<"ollama" | "claude">("ollama");
   const [results, setResults] = useState<GradeCriterionResult[]>([]);
   const [attachmentFindings, setAttachmentFindings] = useState<AttachmentFinding[]>([]);
   const [aiUseAssessment, setAiUseAssessment] = useState<AiUseAssessment | null>(null);
@@ -403,6 +404,7 @@ export default function App() {
           rubric: rubricForGrading, submissionText, apaEnabled, context,
           assignmentId: attachmentAssignmentId,
           courseId: selectedCourse?.id ?? null,
+          backend: gradingBackend,
         }),
       );
       setResults(response.results); setModel(response.model);
@@ -706,8 +708,9 @@ export default function App() {
               <label htmlFor="pseudonym">Student pseudonym</label><input id="pseudonym" value={pseudonym} maxLength={120} placeholder="COURSE-SECTION-SXXXXXXXX" onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }} /><small>Optional. Leave this blank to generate suggestions without saving; you can supply a pseudonym afterwards to keep the run. Saving requires the pseudonym to exist in this course's imported roster.</small><button type="button" className="secondary history-button" disabled={!selectedCourse || !pseudonym.trim() || busy === "history"} onClick={() => void loadHistory()}>{busy === "history" ? "Searching…" : "Find saved records"}</button>
             </div>
             <fieldset><legend>APA evaluation</legend><label className="switch-row"><input type="checkbox" checked={apaEnabled} onChange={(event) => setApaEnabled(event.target.checked)} /><span>Evaluate APA requirements</span></label><p className={apaEnabled ? "enabled-note" : "disabled-note"}>{apaEnabled ? "Enabled: APA applies only where the rubric explicitly supports it." : "Disabled: the grader must not deduct points, lower ratings, criticize, or mention APA."}</p></fieldset>
+            <fieldset><legend>Grading backend</legend><label className="switch-row"><input type="radio" name="gradingBackend" value="ollama" checked={gradingBackend === "ollama"} onChange={() => setGradingBackend("ollama")} /><span>Local Ollama</span></label><label className="switch-row"><input type="radio" name="gradingBackend" value="claude" checked={gradingBackend === "claude"} onChange={() => setGradingBackend("claude")} /><span>Claude Haiku (cloud)</span></label><p className={gradingBackend === "claude" ? "enabled-note" : "disabled-note"}>{gradingBackend === "claude" ? "Cloud: grading sent to Anthropic. Requires ANTHROPIC_API_KEY in server .env." : "Local: all grading runs on your machine via Ollama. No data leaves."}</p></fieldset>
           </div>
-          <button className="primary large" type="button" disabled={!selectedRubric || !submissionText || busy === "grading"} onClick={() => void gradeSubmission()}>{busy === "grading" ? "Grading locally…" : "Generate grading suggestions"}</button>
+          <button className="primary large" type="button" disabled={!selectedRubric || !submissionText || busy === "grading"} onClick={() => void gradeSubmission()}>{busy === "grading" ? (gradingBackend === "claude" ? "Grading with Claude…" : "Grading locally…") : "Generate grading suggestions"}</button>
           {(!selectedRubric || !submissionText) && <small>Choose a rubric and extract a document to continue.</small>}
           {history.length > 0 && <div className="history-list" aria-label="Saved grading records">
             <h3>Saved records for {pseudonym}</h3>

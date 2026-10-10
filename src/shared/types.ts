@@ -129,6 +129,8 @@ export interface AnnouncementDraft {
   announcement: string;
 }
 
+export type GradingBackend = "ollama" | "claude";
+
 export interface GradeCriterionResult {
   resultId?: string;
   criterionId: string;

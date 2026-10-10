@@ -15,6 +15,10 @@ const envSchema = z.object({
   // Grading context window in tokens. Prompt instructions and rubric use ~5k tokens and
   // the bounded output up to 3k, so 8192 rejected papers longer than about four pages.
   OLLAMA_GRADING_NUM_CTX: z.coerce.number().int().min(8192).max(131_072).default(16_384),
+  // Cloud grading backend. Set to "claude" and supply ANTHROPIC_API_KEY to use Claude Haiku.
+  GRADING_BACKEND: z.enum(["ollama", "claude"]).default("ollama"),
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  ANTHROPIC_MODEL: z.string().trim().min(1).default("claude-haiku-4-5"),
   LIBREOFFICE_PATH: z.string().trim().min(1).default(defaultLibreOffice),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   JSON_LIMIT: z.string().trim().min(1).default("1mb")
@@ -34,6 +38,9 @@ export const config = {
   ollamaModel: parsed.OLLAMA_MODEL,
   ollamaTimeoutMs: parsed.OLLAMA_TIMEOUT_MS,
   ollamaGradingNumCtx: parsed.OLLAMA_GRADING_NUM_CTX,
+  gradingBackend: parsed.GRADING_BACKEND,
+  anthropicApiKey: parsed.ANTHROPIC_API_KEY,
+  anthropicModel: parsed.ANTHROPIC_MODEL,
   libreOfficePath: parsed.LIBREOFFICE_PATH,
   port: parsed.PORT,
   jsonLimit: parsed.JSON_LIMIT
