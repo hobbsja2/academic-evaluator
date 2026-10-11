@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type {
   AiUseAssessment, AttachmentFinding, AttachmentSnapshot, Course, GradeCriterionResult, NormalizedRubric,
   StagedDiscussionSubmission
@@ -413,8 +413,10 @@ export default function App() {
       setGradingRunId(response.gradingRunId);
       setAppliedAttachments(response.appliedAttachments ?? []);
       const applied = response.appliedAttachments?.length
-        ? ` Applied ${response.appliedAttachments.length} assignment file(s): ${response.appliedAttachments.map((item) => item.fileName).join(", ")}.`
-        : "";
+        ? ` ${response.appliedAttachments.length} assignment file(s) included in grading: ${response.appliedAttachments.map((item) => item.fileName).join(", ")}.`
+        : attachmentAssignmentId
+          ? " No assignment files were sent to the grader — check that files are attached and have requirements text saved."
+          : "";
       setNotice({ kind: "success", text: (context ? "Suggestions generated and saved as a reviewable run." : "Suggestions generated for review. This run was not persisted.") + applied });
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
@@ -443,27 +445,32 @@ export default function App() {
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
-  function updateResult(index: number, patch: Partial<GradeCriterionResult>) {
+  const updateResult = useCallback((index: number, patch: Partial<GradeCriterionResult>) => {
     setResults((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
-  }
+  }, []);
 
-  async function saveResult(index: number) {
-    const result = results[index]; if (!result.resultId) return;
-    setBusy(`save-${index}`);
-    try {
-      await api(`/api/grading/results/${result.resultId}`, jsonInit("PATCH", {
+  const saveResult = useCallback(async (index: number) => {
+    setResults((current) => {
+      const result = current[index];
+      if (!result?.resultId) return current;
+      setBusy(`save-${index}`);
+      void api(`/api/grading/results/${result.resultId}`, jsonInit("PATCH", {
         approvedRating: result.approvedRating, approvedPoints: result.approvedPoints,
         approvedExplanation: result.approvedExplanation,
-      }));
-      setNotice({ kind: "success", text: "Approved criterion saved." });
-    } catch (error) { showError(error); } finally { setBusy(""); }
-  }
+      })).then(() => {
+        setNotice({ kind: "success", text: "Approved criterion saved." });
+      }).catch((error: unknown) => {
+        showError(error);
+      }).finally(() => setBusy(""));
+      return current;
+    });
+  }, []);
 
-  async function copyComment(result: GradeCriterionResult) {
-    const text = `${result.approvedRating} — ${result.approvedPoints} points\n${result.approvedExplanation}`;
+  const copyComment = useCallback(async (result: GradeCriterionResult) => {
+    const text = result.approvedExplanation;
     try { await navigator.clipboard.writeText(text); setNotice({ kind: "success", text: "Canvas-ready comment copied." }); }
     catch { setNotice({ kind: "error", text: "Clipboard access was blocked. Select and copy the approved comment manually." }); }
-  }
+  }, []);
 
   async function analyzeDiscussion() {
     if (!discussionPost.trim()) return;
@@ -762,19 +769,18 @@ export default function App() {
 
         {results.length > 0 && <section className="results" aria-labelledby="results-heading">
           <div className="results-title"><div><p className="eyebrow">Human review required</p><h2 id="results-heading">Criterion results</h2></div><span className="model-chip">Model: {model}</span></div>
-          {results.map((result, index) => {
-            const criterion = selectedRubric?.criteria.find((item) => item.sourceId === result.criterionId);
-            return <article className="result-card" key={result.criterionId}>
-              <div className="result-header"><div><span>Criterion {index + 1}</span><h3>{criterion?.name || result.criterionId}</h3></div><span className={result.reviewRequired ? "badge review" : "badge ready"}>{result.reviewRequired ? "Review required" : "Ready to review"}</span></div>
-              <div className="suggestion-grid"><div><span>Suggested rating</span><strong>{result.suggestedRating}</strong></div><div><span>Suggested points</span><strong>{result.suggestedPoints} / {criterion?.maximumPoints ?? "—"}</strong></div><div><span>Confidence</span><strong>{Math.round(result.confidence * 100)}%</strong></div></div>
-              <div className="analysis-copy"><h4>Model rationale</h4><p>{result.explanation}</p><h4>Evidence</h4>{result.evidence.length ? <ul>{result.evidence.map((evidence, evidenceIndex) => <li key={evidenceIndex}>{evidence}</li>)}</ul> : <p>No direct evidence returned.</p>}</div>
-              <div className="approval-editor"><h4>Approved Canvas feedback</h4><div className="form-grid"><Field label="Approved rating" required value={result.approvedRating} onChange={(value) => updateResult(index, { approvedRating: value })} /><Field label="Approved points" type="number" min={0} step="any" required value={String(result.approvedPoints)} max={criterion?.maximumPoints ?? undefined} onChange={(value) => updateResult(index, { approvedPoints: Number(value) })} /></div>
-                <label htmlFor={`explanation-${index}`}>Approved comment</label><textarea id={`explanation-${index}`} rows={4} maxLength={1500} value={result.approvedExplanation} onChange={(event) => updateResult(index, { approvedExplanation: event.target.value })} />
-                <div className="button-row"><button type="button" onClick={() => void copyComment(result)}>Copy Canvas-ready comment</button><button type="button" className="secondary" disabled={!result.resultId || busy === `save-${index}`} onClick={() => void saveResult(index)}>{busy === `save-${index}` ? "Saving…" : "Save approved edits"}</button></div>
-                {!result.resultId && <small>Not saved yet. Use <strong>Keep this run</strong> above to store it against a pseudonym; approved edits can then be saved without regrading.</small>}
-              </div>
-            </article>;
-          })}
+          {results.map((result, index) => (
+            <ResultCard
+              key={result.criterionId}
+              result={result}
+              index={index}
+              criterion={selectedRubric?.criteria.find((item) => item.sourceId === result.criterionId)}
+              isSaving={busy === `save-${index}`}
+              onUpdate={updateResult}
+              onSave={saveResult}
+              onCopy={copyComment}
+            />
+          ))}
         </section>}
         </>}
       </main>
@@ -790,3 +796,89 @@ function Field({ label, onChange, ...props }: { label: string; onChange: (value:
   const id = `field-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
   return <div><label htmlFor={id}>{label}</label><input id={id} {...props} onChange={(event) => onChange(event.target.value)} /></div>;
 }
+
+function AutoResizeTextarea({ value, onChange, id, maxLength, className }: {
+  value: string;
+  onChange: (value: string) => void;
+  id?: string;
+  maxLength?: number;
+  className?: string;
+}) {
+  const ref = React.useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      id={id}
+      value={value}
+      maxLength={maxLength}
+      className={className}
+      style={{ overflow: "hidden", resize: "none" }}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+}
+
+type ResultCardProps = {
+  result: GradeCriterionResult;
+  index: number;
+  criterion: import("../shared/types").NormalizedCriterion | undefined;
+  isSaving: boolean;
+  onUpdate: (index: number, patch: Partial<GradeCriterionResult>) => void;
+  onSave: (index: number) => void;
+  onCopy: (result: GradeCriterionResult) => void;
+};
+
+const ResultCard = React.memo(function ResultCard({
+  result, index, criterion, isSaving, onUpdate, onSave, onCopy
+}: ResultCardProps) {
+  return (
+    <article className="result-card">
+      <div className="result-header">
+        <div><span>Criterion {index + 1}</span><h3>{criterion?.name || result.criterionId}</h3></div>
+        <span className={result.reviewRequired ? "badge review" : "badge ready"}>
+          {result.reviewRequired ? "Review required" : "Ready to review"}
+        </span>
+      </div>
+      <div className="suggestion-grid">
+        <div><span>Suggested rating</span><strong>{result.suggestedRating}</strong></div>
+        <div><span>Suggested points</span><strong>{result.suggestedPoints} / {criterion?.maximumPoints ?? "—"}</strong></div>
+        <div><span>Confidence</span><strong>{Math.round(result.confidence * 100)}%</strong></div>
+      </div>
+      <div className="analysis-copy">
+        <h4>Model rationale</h4><p>{result.explanation}</p>
+        <h4>Evidence</h4>
+        {result.evidence.length
+          ? <ul>{result.evidence.map((evidence, evidenceIndex) => <li key={evidenceIndex}>{evidence}</li>)}</ul>
+          : <p>No direct evidence returned.</p>}
+      </div>
+      <div className="approval-editor">
+        <h4>Approved Canvas feedback</h4>
+        <div className="form-grid">
+          <Field label="Approved rating" required value={result.approvedRating}
+            onChange={(value) => onUpdate(index, { approvedRating: value })} />
+          <Field label="Approved points" type="number" min={0} step="any" required
+            value={String(result.approvedPoints)} max={criterion?.maximumPoints ?? undefined}
+            onChange={(value) => onUpdate(index, { approvedPoints: Number(value) })} />
+        </div>
+        <label htmlFor={`explanation-${index}`}>Approved comment</label>
+        <AutoResizeTextarea id={`explanation-${index}`} maxLength={1500}
+          value={result.approvedExplanation}
+          onChange={(value) => onUpdate(index, { approvedExplanation: value })} />
+        <div className="button-row">
+          <button type="button" onClick={() => onCopy(result)}>Copy Canvas-ready comment</button>
+          <button type="button" className="secondary" disabled={!result.resultId || isSaving}
+            onClick={() => onSave(index)}>
+            {isSaving ? "Saving…" : "Save approved edits"}
+          </button>
+        </div>
+        {!result.resultId && <small>Not saved yet. Use <strong>Keep this run</strong> above to store it against a pseudonym; approved edits can then be saved without regrading.</small>}
+      </div>
+    </article>
+  );
+});

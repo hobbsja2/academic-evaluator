@@ -207,7 +207,9 @@ function AttachmentRow({ attachment, busy, onSave, onDelete }: AttachmentRowProp
           <span>{ROLE_BADGES[attachment.role]}</span>
           <h3>{attachment.fileName}</h3>
         </div>
-        <span className="badge ready">{attachment.extractedCharacters.toLocaleString()} chars extracted</span>
+        <span className={`badge ${attachment.includeInGrading && requirements.trim() ? "ready" : "review"}`}>
+          {!attachment.includeInGrading ? "Excluded from grading" : !requirements.trim() ? "No requirements — will not be sent to grader" : `${attachment.extractedCharacters.toLocaleString()} chars extracted`}
+        </span>
       </div>
       <div className="approval-editor">
         <label htmlFor={`role-${attachment.id}`}>Role</label>
@@ -224,6 +226,9 @@ function AttachmentRow({ attachment, busy, onSave, onDelete }: AttachmentRowProp
           placeholder="List the checkable requirements from this file, one per line."
           onChange={(event) => setRequirements(event.target.value)} />
         <small>{requirements.length.toLocaleString()} / {MAX_REQUIREMENTS_LENGTH.toLocaleString()} characters. Only the first {PROMPT_BUDGET_LABEL} characters reach the grader.</small>
+        {attachment.includeInGrading && !requirements.trim() && (
+          <p className="warning-text" role="alert">This file has no requirements text. Save the extracted text above (or trim it to key requirements) so the grader can check against it.</p>
+        )}
         <div className="button-row">
           <button type="button" disabled={saving}
             onClick={() => onSave(attachment.id, { requirements: requirements.trim() || null })}>
@@ -330,6 +335,9 @@ export function AttachmentsPanel({
       <p className="scoring-note">
         {assignmentName ? `Attached to ${assignmentName}. ` : ""}
         {appliedCount} of {attachments.length} file(s) will be applied when grading. These inform existing rubric criteria; they never add new criteria or point values.
+        {attachments.some((a) => a.includeInGrading && !a.requirements?.trim()) && (
+          <strong> Warning: one or more included files have no requirements text and will be skipped by the grader. Add requirements text and save.</strong>
+        )}
       </p>
       <UploadField reading={busy === "attachment-extract"} onFiles={(files) => void handleFiles(files)} />
       <PendingSection
