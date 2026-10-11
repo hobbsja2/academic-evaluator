@@ -668,9 +668,23 @@ async function requestModelSuggestions(
   // --- shared parsing and ID remapping ---
   const backendLabel = backend === "claude" ? "Claude" : "Local Ollama";
   let decoded: unknown;
-  try { decoded = JSON.parse(content); } catch { throw new RetryableModelError(`${backendLabel} returned invalid JSON`); }
+  try { decoded = JSON.parse(content); } catch (parseError) {
+    writeStructuredLog("info", "grading_parse_failed", {
+      backend,
+      contentLength: content.length,
+      contentPreview: content.slice(0, 300),
+      error: parseError instanceof Error ? parseError.message : "unknown"
+    });
+    throw new RetryableModelError(`${backendLabel} returned invalid JSON`);
+  }
   const parsed = outputSchema.safeParse(decoded);
-  if (!parsed.success) throw new RetryableModelError(`${backendLabel} returned an unexpected result shape`);
+  if (!parsed.success) {
+    writeStructuredLog("info", "grading_schema_failed", {
+      backend,
+      issues: JSON.stringify(parsed.error.issues.slice(0, 5).map((i) => ({ path: i.path.join("."), message: i.message })))
+    });
+    throw new RetryableModelError(`${backendLabel} returned an unexpected result shape`);
+  }
   const received = new Set<string>();
   const mapped: z.infer<typeof suggestionSchema>[] = [];
   for (const item of parsed.data.results) {

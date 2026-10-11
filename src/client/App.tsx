@@ -449,21 +449,17 @@ export default function App() {
     setResults((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
   }, []);
 
-  const saveResult = useCallback(async (index: number) => {
-    setResults((current) => {
-      const result = current[index];
-      if (!result?.resultId) return current;
-      setBusy(`save-${index}`);
-      void api(`/api/grading/results/${result.resultId}`, jsonInit("PATCH", {
-        approvedRating: result.approvedRating, approvedPoints: result.approvedPoints,
-        approvedExplanation: result.approvedExplanation,
-      })).then(() => {
-        setNotice({ kind: "success", text: "Approved criterion saved." });
-      }).catch((error: unknown) => {
-        showError(error);
-      }).finally(() => setBusy(""));
-      return current;
-    });
+  const saveResult = useCallback(async (index: number, resultToSave: GradeCriterionResult) => {
+    if (!resultToSave.resultId) return;
+    setBusy(`save-${index}`);
+    try {
+      await api(`/api/grading/results/${resultToSave.resultId}`, jsonInit("PATCH", {
+        approvedRating: resultToSave.approvedRating,
+        approvedPoints: resultToSave.approvedPoints,
+        approvedExplanation: resultToSave.approvedExplanation,
+      }));
+      setNotice({ kind: "success", text: "Approved criterion saved." });
+    } catch (error) { showError(error); } finally { setBusy(""); }
   }, []);
 
   const copyComment = useCallback(async (result: GradeCriterionResult) => {
@@ -830,7 +826,7 @@ type ResultCardProps = {
   criterion: import("../shared/types").NormalizedCriterion | undefined;
   isSaving: boolean;
   onUpdate: (index: number, patch: Partial<GradeCriterionResult>) => void;
-  onSave: (index: number) => void;
+  onSave: (index: number, result: GradeCriterionResult) => void;
   onCopy: (result: GradeCriterionResult) => void;
 };
 
@@ -873,7 +869,7 @@ const ResultCard = React.memo(function ResultCard({
         <div className="button-row">
           <button type="button" onClick={() => onCopy(result)}>Copy Canvas-ready comment</button>
           <button type="button" className="secondary" disabled={!result.resultId || isSaving}
-            onClick={() => onSave(index)}>
+            onClick={() => onSave(index, result)}>
             {isSaving ? "Saving…" : "Save approved edits"}
           </button>
         </div>
