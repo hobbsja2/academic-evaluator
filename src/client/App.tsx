@@ -801,12 +801,16 @@ function AutoResizeTextarea({ value, onChange, id, maxLength, className }: {
   className?: string;
 }) {
   const ref = React.useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
+
+  // Resize on mount and whenever value changes externally (e.g. after generation).
+  // Using a layout effect keeps it synchronous with the DOM paint so there's no flash.
+  React.useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   }, [value]);
+
   return (
     <textarea
       ref={ref}
@@ -815,7 +819,14 @@ function AutoResizeTextarea({ value, onChange, id, maxLength, className }: {
       maxLength={maxLength}
       className={className}
       style={{ overflow: "hidden", resize: "none" }}
-      onChange={(event) => onChange(event.target.value)}
+      onChange={(event) => {
+        // Resize immediately in the event handler before React re-renders,
+        // so the height update is synchronous and doesn't swallow keystrokes.
+        const el = event.currentTarget;
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+        onChange(event.target.value);
+      }}
     />
   );
 }
