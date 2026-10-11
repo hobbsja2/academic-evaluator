@@ -583,9 +583,9 @@ async function callClaude(
     input_schema: { ...format, type: "object" as const }
   };
 
-  // Claude needs more token headroom than Ollama: it writes richer explanations
-  // and the tool_use wrapper adds overhead. Scale generously with a higher cap.
-  const maxTokens = Math.min(8000, Math.max(2000, modelCriteria.length * 1000 + 600));
+  // Claude needs generous output headroom — tool_use adds overhead and explanations
+  // are richer than Ollama's. Cap at claude-haiku-4-5's output limit of 8192.
+  const maxTokens = Math.min(8192, Math.max(3000, modelCriteria.length * 1200 + 800));
 
   const systemPrompt = [
     "You are a rigorous, fair grading assistant.",
