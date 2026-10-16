@@ -1,22 +1,8 @@
 import { app } from "./app.js";
 import { config } from "./config.js";
-import { closeDatabase, databaseConfigured, purgeExpiredCourses } from "./db.js";
+import { closeDatabase } from "./db.js";
 import { writeStructuredLog } from "./logger.js";
-
-async function runRetention(): Promise<void> {
-  if (!databaseConfigured()) return;
-  try {
-    const count = await purgeExpiredCourses();
-    if (count > 0) writeStructuredLog("info", "retention_purge_completed", { deletedCourses: count });
-  } catch (error) {
-    // Previously logged with no detail, which made recurring purge failures
-    // impossible to diagnose.
-    writeStructuredLog("error", "retention_purge_failed", {
-      errorName: error instanceof Error ? error.name : "UnknownError",
-      detail: error instanceof Error ? error.message.slice(0, 300) : ""
-    });
-  }
-}
+import { runRetention, startRetentionSchedule, stopRetentionSchedule } from "./retention.js";
 
 // The backend has been dying silently while idle, leaving Vite serving a UI with no
 // API behind it. Nothing here prevents that, but it makes the cause visible instead
@@ -48,20 +34,18 @@ for (const signal of ["SIGHUP", "SIGBREAK"] as const) {
   });
 }
 
-try {
-  await runRetention();
-} catch (error) {
-  throw error;
-}
-const retentionTimer = setInterval(() => void runRetention(), 6 * 60 * 60 * 1000);
-retentionTimer.unref();
+// Not awaited: the startup purge now retries with backoff, and blocking on it would
+// delay listening by the whole retry budget in exactly the case where the database
+// is unreachable. Its outcome is reported on /api/health instead.
+startRetentionSchedule();
+void runRetention();
 
 const server = app.listen(config.port, "127.0.0.1", () => {
   writeStructuredLog("info", "backend_listening", { host: "127.0.0.1", port: config.port });
 });
 
 async function shutdown(): Promise<void> {
-  clearInterval(retentionTimer);
+  stopRetentionSchedule();
   server.close();
   try {
     await closeDatabase();

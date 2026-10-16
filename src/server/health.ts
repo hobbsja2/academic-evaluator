@@ -4,6 +4,7 @@ import { Router } from "express";
 import { config } from "./config.js";
 import { databaseConfigured, databaseConnected } from "./db.js";
 import { ollamaStatus } from "./grading.js";
+import { retentionStatus } from "./retention.js";
 
 const run = promisify(execFile);
 const router = Router();
@@ -29,7 +30,9 @@ router.get("/", async (_request, response) => {
       status: "ok",
       database: { configured: databaseConfigured(), connected },
       ollama,
-      libreOffice
+      libreOffice,
+      // Timestamps, a failure count and an error name only — no course or student data.
+      retention: retentionStatus()
     });
   } catch (error) {
     throw error;

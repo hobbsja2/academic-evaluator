@@ -3,13 +3,15 @@ import { readFile } from "node:fs/promises";
 import { Pool, type PoolClient } from "@neondatabase/serverless";
 import { writeStructuredLog } from "./logger.js";
 
+// Applied in order inside one transaction. Each file is idempotent, so a repeat
+// run is a no-op; a failure in any file rolls back the whole batch.
+const MIGRATION_FILES = ["db/001_initial.sql", "db/002_student_names.sql"] as const;
+
 const databaseUrl = process.env.DATABASE_URL?.trim();
 if (!databaseUrl) {
   writeStructuredLog("error", "migration_database_url_missing");
   process.exitCode = 1;
 } else {
-  const migrationUrl = new URL("../../db/001_initial.sql", import.meta.url);
-  const migration = await readFile(migrationUrl, "utf8");
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   let client: PoolClient | null = null;
   try {
@@ -18,9 +20,12 @@ if (!databaseUrl) {
     try {
       await client.query("BEGIN");
       transactionStarted = true;
-      await client.query(migration);
+      for (const file of MIGRATION_FILES) {
+        const sql = await readFile(new URL(`../../${file}`, import.meta.url), "utf8");
+        await client.query(sql);
+        writeStructuredLog("info", "migration_applied", { migration: file });
+      }
       await client.query("COMMIT");
-      writeStructuredLog("info", "migration_applied", { migration: "db/001_initial.sql" });
     } catch (error) {
       if (transactionStarted) {
         try {

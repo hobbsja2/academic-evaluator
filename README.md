@@ -1,6 +1,6 @@
 # Course Grading Assist
 
-Local-first React/Node application for faculty-reviewed grading against Canvas rubrics. Ollama performs inference locally; Neon stores course, pseudonym, rubric, and review data.
+Local-first React/Node application for faculty-reviewed grading against Canvas rubrics. Ollama performs inference locally; Neon stores course, roster, rubric, and review data. Roster import writes each student's real name to `students.display_name` unencrypted, so that column is identifiable data held under the 21-day cascading purge.
 
 ## Prerequisites
 
@@ -46,12 +46,10 @@ The extension has no Canvas host permission and stores no Canvas credentials, co
 ## Privacy and retention
 
 - Original submissions and filenames are processed in memory and are not stored in Neon.
-- Neon receives course-specific pseudonyms, not student names, email addresses, Canvas IDs, SIS IDs, or roster rows.
-- **Encrypted crosswalk export is recommended.** The complete identifiable CSV is protected with a passphrase before download. The passphrase is never stored and cannot be recovered, so keep it separately in an approved password manager.
-- An encrypted crosswalk can be unlocked in the app when an identity label is needed. Decryption occurs in server memory, and the returned identity-label/pseudonym mappings remain only in React memory until the page reloads or the selected course changes. They are not saved to Neon, localStorage, sessionStorage, or IndexedDB.
-- Plaintext CSV export remains available as an explicitly acknowledged fallback. It contains identifiable, unencrypted student data and must be stored outside this repository in an approved secure location.
+- Neon stores each student's name from the imported roster alongside that student's course-specific pseudonym. Grading runs reference the student row, not the name, and no name is written to a grading run or a log line. The 21-day cascading purge below is the retention control for the name column.
 - Course data is deleted with cascading relationships 21 days after the course end date. Cleanup runs at startup and every six hours while the server is running.
 - Assignment directions may be stored as bounded plain text with a rubric and grading run. They provide supporting context only: the rubric remains the sole scoring authority, and directions cannot create independent deductions or override the APA setting.
 - Rubric rating point values are scoring anchors, not exclusive allowed scores. The local grader may recommend any defensible value from zero through the criterion maximum—including values between anchors—while using the best-fitting qualitative rating label. The professor can edit both fields and makes the final determination.
 - The tool suggests grades only. A professor must review/edit every criterion and manually enter approved results in Canvas.
 - When APA evaluation is disabled, the grading prompt explicitly prohibits APA-based deductions or criticism.
+- When a student is selected, the feedback already saved for that student's other assignments in the course is summarised into the grading prompt as supporting context. It is sent to the model only and never displayed. `PRIOR_FEEDBACK_MAX_CHARS` bounds how much is included (default 3,000 characters, doubled for Claude); `PRIOR_FEEDBACK_MAX_CHARS=0` disables injection entirely.

@@ -15,13 +15,23 @@ const envSchema = z.object({
   // Grading context window in tokens. Prompt instructions and rubric use ~5k tokens and
   // the bounded output up to 3k, so 8192 rejected papers longer than about four pages.
   OLLAMA_GRADING_NUM_CTX: z.coerce.number().int().min(8192).max(131_072).default(16_384),
+  // Character budget for the student's prior saved feedback injected into the
+  // grading prompt. 0 disables injection entirely.
+  PRIOR_FEEDBACK_MAX_CHARS: z.coerce.number().int().min(0).max(20_000).default(3_000),
   // Cloud grading backend. Set to "claude" and supply ANTHROPIC_API_KEY to use Claude Haiku.
   GRADING_BACKEND: z.enum(["ollama", "claude"]).default("ollama"),
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   ANTHROPIC_MODEL: z.string().trim().min(1).default("claude-haiku-4-5"),
   LIBREOFFICE_PATH: z.string().trim().min(1).default(defaultLibreOffice),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
-  JSON_LIMIT: z.string().trim().min(1).default("1mb")
+  JSON_LIMIT: z.string().trim().min(1).default("1mb"),
+  // How often expired courses are purged. The machine sleeps, which suspends the
+  // timer and kills the pool's idle connections, so the purge needs both a retry
+  // and a shorter re-attempt after a failed sweep rather than waiting a full cycle.
+  RETENTION_INTERVAL_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(6 * 60 * 60 * 1000),
+  RETENTION_RETRY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  RETENTION_RETRY_BACKOFF_MS: z.coerce.number().int().min(1_000).max(600_000).default(5_000),
+  RETENTION_RECOVERY_DELAY_MS: z.coerce.number().int().min(60_000).max(21_600_000).default(15 * 60 * 1000)
 });
 
 const parsed = envSchema.parse(process.env);
@@ -43,12 +53,14 @@ export const config = {
   anthropicModel: parsed.ANTHROPIC_MODEL,
   libreOfficePath: parsed.LIBREOFFICE_PATH,
   port: parsed.PORT,
-  jsonLimit: parsed.JSON_LIMIT
+  jsonLimit: parsed.JSON_LIMIT,
+  retentionIntervalMs: parsed.RETENTION_INTERVAL_MS,
+  retentionRetryAttempts: parsed.RETENTION_RETRY_ATTEMPTS,
+  retentionRetryBackoffMs: parsed.RETENTION_RETRY_BACKOFF_MS,
+  retentionRecoveryDelayMs: parsed.RETENTION_RECOVERY_DELAY_MS,
+  priorFeedbackMaxChars: parsed.PRIOR_FEEDBACK_MAX_CHARS,
+  // How many of the student's most recent saved runs are considered.
+  priorFeedbackRunLimit: 5,
+  // Claude's context is far larger than the local model's, so it gets more budget.
+  priorFeedbackClaudeFactor: 2
 } as const;
-
-export function requireIdentityKey(): string {
-  if (!config.studentIdentityKey) {
-    throw Object.assign(new Error("STUDENT_IDENTITY_KEY is required for pseudonym actions"), { status: 503 });
-  }
-  return config.studentIdentityKey;
-}

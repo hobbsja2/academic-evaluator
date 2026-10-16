@@ -1,52 +1,48 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes, scrypt } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { Router } from "express";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { z } from "zod";
-import { requireIdentityKey } from "./config.js";
-import { getDatabase, withTransaction } from "./db.js";
+import type { RosterStudent } from "../shared/types.js";
+import { config } from "./config.js";
+import { requireDatabase, withTransaction } from "./db.js";
 import { HttpError } from "./errors.js";
+import { writeStructuredLog } from "./logger.js";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
-const unlockUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
-const baseFieldsSchema = z.object({
-  courseId: z.string().uuid(),
-  courseCode: z.string().trim().min(1).max(80),
-  section: z.string().trim().min(1).max(80),
-  format: z.enum(["encrypted", "csv"]).default("encrypted")
-});
-const unlockFieldsSchema = z.object({ passphrase: z.string().min(12).max(256) }).strict();
 const stablePriority = ["id", "canvas user id", "sis id", "sis user id", "login id", "sis login id"];
 const identityLabelPriority = ["name", "sortable name", "login id", "sis id"];
-const formatMarker = "cga-roster-crosswalk";
-const aad = Buffer.from("course-grading-assist/roster-crosswalk/v1", "utf8");
-const scryptParameters = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
-const envelopeSchema = z.object({
-  format: z.literal(formatMarker),
-  version: z.literal(1),
-  cipher: z.literal("AES-256-GCM"),
-  kdf: z.object({
-    name: z.literal("scrypt"),
-    N: z.literal(scryptParameters.N),
-    r: z.literal(scryptParameters.r),
-    p: z.literal(scryptParameters.p),
-    maxmem: z.literal(scryptParameters.maxmem),
-    salt: z.string()
-  }).strict(),
-  iv: z.string(),
-  authTag: z.string(),
-  ciphertext: z.string()
-}).strict();
+const MAX_STUDENT_NAME_CHARS = 200;
+const MAX_ROSTER_ROWS = 500;
+const MAX_REPORTED_HEADERS = 12;
+const MAX_REPORTED_HEADER_CHARS = 40;
+const courseIdSchema = z.object({ courseId: z.string().uuid() });
 
-type CrosswalkEnvelope = z.infer<typeof envelopeSchema>;
-type UnlockedMapping = { identityLabel: string; pseudonym: string };
+type ParsedRoster = {
+  headers: string[];
+  normalized: string[];
+  rows: string[][];
+  stableIndex: number;
+  stableHeader: string;
+};
 
 function normalizedHeader(value: string): string {
   return value.replace(/^\uFEFF/, "").trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
-function readCsv(buffer: Buffer): { headers: string[]; rows: string[][]; stableIndex: number; stableHeader: string } {
+/**
+ * Renders the header row for a 400 message so a rejected CSV tells the user what
+ * their file actually contains. Column headers are not student data, but the list
+ * is bounded in both length and count so a malformed file cannot pad the response.
+ */
+function describeHeaders(headers: string[]): string {
+  const shown = headers.slice(0, MAX_REPORTED_HEADERS).map((header) => header.slice(0, MAX_REPORTED_HEADER_CHARS));
+  const suffix = headers.length > MAX_REPORTED_HEADERS ? `, … (${headers.length} columns total)` : "";
+  return `${shown.join(", ")}${suffix}`;
+}
+
+function readCsv(buffer: Buffer): ParsedRoster {
   const records = parse(buffer, { bom: true, relax_column_count: true, skip_empty_lines: true }) as string[][];
   if (records.length < 2) throw new HttpError(400, "CSV must contain a header and at least one data row");
   const headers = records[0].map((value) => String(value ?? "").trim());
@@ -56,18 +52,17 @@ function readCsv(buffer: Buffer): { headers: string[]; rows: string[][]; stableI
     stableIndex = normalized.indexOf(candidate);
     if (stableIndex >= 0) break;
   }
-  if (stableIndex < 0) throw new HttpError(400, `CSV needs one stable ID column: ${stablePriority.join(", ")}`);
+  if (stableIndex < 0) {
+    throw new HttpError(400, `CSV needs one stable ID column: ${stablePriority.join(", ")}. `
+      + `Found: ${describeHeaders(headers)}`);
+  }
   const roleIndex = normalized.indexOf("role");
   const allRows = records.slice(1).map((row) => row.map((value) => String(value ?? "")));
   const rows = roleIndex < 0
     ? allRows
     : allRows.filter((row) => normalizedHeader(row[roleIndex] ?? "").includes("student"));
   if (!rows.length) throw new HttpError(400, "CSV contains no student rows");
-  return { headers, rows, stableIndex, stableHeader: headers[stableIndex] };
-}
-
-function sanitize(value: string): string {
-  return value.toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 20) || "COURSE";
+  return { headers, normalized, rows, stableIndex, stableHeader: headers[stableIndex] };
 }
 
 function base32ish(buffer: Buffer): string {
@@ -85,126 +80,56 @@ function base32ish(buffer: Buffer): string {
   return output;
 }
 
-function pseudonym(key: string, courseId: string, courseCode: string, section: string, stableId: string): string {
-  const digest = createHmac("sha256", key).update(`${courseId}\0${stableId}`).digest();
-  return `${sanitize(courseCode)}-${sanitize(section)}-S${base32ish(digest)}`;
+/**
+ * Derives a stable, course-scoped pseudonym. Keyed on the course UUID rather than
+ * its code and section, so renaming a course never changes an existing pseudonym.
+ */
+function pseudonym(key: string, courseId: string, stableId: string): string {
+  const coursePart = base32ish(createHmac("sha256", key).update(courseId).digest());
+  const studentPart = base32ish(createHmac("sha256", key).update(`${courseId}\0${stableId}`).digest());
+  return `C${coursePart}-S${studentPart}`;
 }
 
-function csvCell(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-function deriveKey(passphrase: string, salt: Buffer): Promise<Buffer> {
-  const secret = Buffer.from(passphrase, "utf8");
-  return new Promise((resolve, reject) => {
-    scrypt(secret, salt, 32, scryptParameters, (error, key) => {
-      secret.fill(0);
-      if (error) reject(error);
-      else resolve(key);
-    });
-  });
-}
-
-async function encryptCrosswalk(plaintext: Buffer, passphrase: string): Promise<CrosswalkEnvelope> {
-  const salt = randomBytes(16);
-  const iv = randomBytes(12);
-  let key: Buffer | undefined;
-  try {
-    key = await deriveKey(passphrase, salt);
-    const cipher = createCipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
-    cipher.setAAD(aad);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-    return {
-      format: formatMarker,
-      version: 1,
-      cipher: "AES-256-GCM",
-      kdf: { name: "scrypt", ...scryptParameters, salt: salt.toString("base64") },
-      iv: iv.toString("base64"),
-      authTag: authTag.toString("base64"),
-      ciphertext: ciphertext.toString("base64")
-    };
-  } finally {
-    key?.fill(0);
+function resolveNameIndex(parsed: ParsedRoster): number {
+  for (const candidate of identityLabelPriority) {
+    const index = parsed.normalized.indexOf(candidate);
+    if (index >= 0) return index;
   }
+  throw new HttpError(400, `CSV needs one student name column: ${identityLabelPriority.join(", ")}. `
+    + `Found: ${describeHeaders(parsed.headers)}`);
 }
 
-function decodeBase64(value: string, field: string, expectedLength?: number): Buffer {
-  if (!value || value.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new HttpError(400, `Encrypted crosswalk has invalid ${field}`);
-  }
-  const decoded = Buffer.from(value, "base64");
-  if (decoded.toString("base64") !== value || (expectedLength !== undefined && decoded.length !== expectedLength)) {
-    decoded.fill(0);
-    throw new HttpError(400, `Encrypted crosswalk has invalid ${field}`);
-  }
-  return decoded;
-}
-
-function parseEnvelope(buffer: Buffer): CrosswalkEnvelope {
-  let value: unknown;
-  try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer));
-  } catch {
-    throw new HttpError(400, "Encrypted crosswalk file is not valid JSON");
-  }
-  const result = envelopeSchema.safeParse(value);
-  if (!result.success) throw new HttpError(400, "Encrypted crosswalk envelope is invalid or unsupported");
-  return result.data;
-}
-
-async function decryptCrosswalk(envelope: CrosswalkEnvelope, passphrase: string): Promise<Buffer> {
-  const salt = decodeBase64(envelope.kdf.salt, "salt", 16);
-  const iv = decodeBase64(envelope.iv, "IV", 12);
-  const authTag = decodeBase64(envelope.authTag, "authentication tag", 16);
-  const ciphertext = decodeBase64(envelope.ciphertext, "ciphertext");
-  let key: Buffer | undefined;
-  try {
-    key = await deriveKey(passphrase, salt);
-    const decipher = createDecipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
-    decipher.setAAD(aad);
-    decipher.setAuthTag(authTag);
-    try {
-      return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    } catch {
-      throw new HttpError(400, "Encrypted crosswalk could not be unlocked");
+/**
+ * Maps parsed rows to pseudonym/name pairs. Row values are never logged, because
+ * a log line could otherwise carry a name fragment. Repeated stable IDs collapse
+ * to one entry (last row wins) so a duplicated roster row cannot make the upsert
+ * touch the same conflict key twice.
+ */
+function collectStudents(parsed: ParsedRoster, key: string, courseId: string): Array<{ pseudonym: string; name: string }> {
+  const nameIndex = resolveNameIndex(parsed);
+  const byPseudonym = new Map<string, { pseudonym: string; name: string }>();
+  parsed.rows.forEach((row, index) => {
+    const rowNumber = index + 1;
+    const stableId = (row[parsed.stableIndex] ?? "").trim();
+    if (!stableId) {
+      throw new HttpError(400, `Row ${rowNumber} has no value in ${parsed.stableHeader}. `
+        + `Columns found: ${describeHeaders(parsed.headers)}`);
     }
-  } finally {
-    key?.fill(0);
-    salt.fill(0);
-    iv.fill(0);
-    authTag.fill(0);
-    ciphertext.fill(0);
-  }
+    const name = (row[nameIndex] ?? "").trim();
+    if (!name) throw new HttpError(400, `Row ${rowNumber} has no student name`);
+    if (name.length > MAX_STUDENT_NAME_CHARS) {
+      throw new HttpError(400, `Row ${rowNumber} has a student name longer than ${MAX_STUDENT_NAME_CHARS} characters`);
+    }
+    const generated = pseudonym(key, courseId, stableId);
+    byPseudonym.set(generated, { pseudonym: generated, name });
+  });
+  return [...byPseudonym.values()];
 }
 
-function readUnlockedMappings(plaintext: Buffer): UnlockedMapping[] {
-  let records: string[][];
-  try {
-    records = parse(plaintext, { bom: true, skip_empty_lines: true }) as string[][];
-  } catch {
-    throw new HttpError(400, "Unlocked file is not a valid pseudonym crosswalk");
-  }
-  if (records.length < 2) throw new HttpError(400, "Unlocked file is not a valid pseudonym crosswalk");
-  const headers = records[0].map((value) => normalizedHeader(String(value ?? "")));
-  const pseudonymMatches = headers.map((value, index) => value === "pseudonym" ? index : -1).filter((index) => index >= 0);
-  const identityIndices = identityLabelPriority.map((candidate) => headers.indexOf(candidate)).filter((index) => index >= 0);
-  if (pseudonymMatches.length !== 1 || !identityIndices.length) {
-    throw new HttpError(400, "Unlocked file is not a valid pseudonym crosswalk");
-  }
-  const pseudonymIndex = pseudonymMatches[0];
-  const seen = new Set<string>();
-  const mappings = records.slice(1).map((row) => {
-    const identityLabel = identityIndices.map((index) => String(row[index] ?? "").trim()).find(Boolean) ?? "";
-    const value = String(row[pseudonymIndex] ?? "").trim();
-    if (!identityLabel || !/^[A-Z0-9]{1,20}-[A-Z0-9]{1,20}-S[A-Z2-7]{8}$/.test(value) || seen.has(value)) {
-      throw new HttpError(400, "Unlocked file is not a valid pseudonym crosswalk");
-    }
-    seen.add(value);
-    return { identityLabel, pseudonym: value };
-  });
-  if (!mappings.length) throw new HttpError(400, "Unlocked file is not a valid pseudonym crosswalk");
-  return mappings;
+// RETURNING order is undefined, so the import response is sorted the same way the
+// list route is, keeping the dropdown order stable across both.
+function sortByLabel(students: RosterStudent[]): RosterStudent[] {
+  return [...students].sort((a, b) => (a.name ?? a.pseudonym).localeCompare(b.name ?? b.pseudonym));
 }
 
 router.post("/validate", upload.single("file"), (request, response) => {
@@ -219,81 +144,64 @@ router.post("/validate", upload.single("file"), (request, response) => {
   });
 });
 
-router.post("/crosswalk", upload.single("file"), async (request, response) => {
+async function persistRoster(courseId: string, csv: Buffer): Promise<RosterStudent[]> {
+  const database = requireDatabase();
+  const key = config.studentIdentityKey;
+  if (!key) throw new HttpError(503, "STUDENT_IDENTITY_KEY is required to import a roster");
+  const parsed = readCsv(csv);
+  if (parsed.rows.length > MAX_ROSTER_ROWS) {
+    throw new HttpError(400, `Roster has more than ${MAX_ROSTER_ROWS} student rows`);
+  }
+  const collected = collectStudents(parsed, key, courseId);
+  const course = await database.query("SELECT id FROM courses WHERE id = $1", [courseId]);
+  if (!course.rows[0]) throw new HttpError(404, "Course not found");
+  const paramGroups: string[] = [];
+  const params: unknown[] = [];
+  let p = 1;
+  for (const student of collected) {
+    paramGroups.push(`($${p}, $${p + 1}, $${p + 2})`);
+    params.push(courseId, student.pseudonym, student.name);
+    p += 3;
+  }
+  return withTransaction(database, async (client) => {
+    const inserted = await client.query(
+      `INSERT INTO students (course_id, pseudonym, display_name) VALUES ${paramGroups.join(", ")}
+        ON CONFLICT (course_id, pseudonym)
+        DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
+        RETURNING id, pseudonym, display_name AS "name"`,
+      params
+    );
+    return inserted.rows as RosterStudent[];
+  });
+}
+
+// Audit trail for a write of identifiable data. Both outcomes are logged because
+// a rejection is otherwise invisible: safeErrorHandler only records 5xx, so a 400
+// used to leave no server-side trace at all. Counts and status only, never a name.
+router.post("/import", upload.single("file"), async (request, response) => {
   response.set("Cache-Control", "no-store");
   if (!request.file) throw new HttpError(400, "A multipart CSV file field named file is required");
-  const fields = baseFieldsSchema.parse(request.body);
-  const passphrase = typeof request.body.passphrase === "string" ? request.body.passphrase : undefined;
-  if (fields.format === "encrypted" && (!passphrase || passphrase.length < 12 || passphrase.length > 256)) {
-    throw new HttpError(400, "Encrypted export requires a passphrase between 12 and 256 characters");
-  }
-  if (fields.format === "csv" && passphrase !== undefined) {
-    throw new HttpError(400, "Plain CSV export must not include a passphrase");
-  }
-  const key = requireIdentityKey();
-  const parsed = readCsv(request.file.buffer);
-  const seen = new Map<string, string>();
-  const outputRows: string[][] = [];
-  const pseudonyms: string[] = [];
-  for (const row of parsed.rows) {
-    const stableId = (row[parsed.stableIndex] ?? "").trim();
-    if (!stableId) throw new HttpError(400, `Every row must have a value in ${parsed.stableHeader}`);
-    const generated = pseudonym(key, fields.courseId, fields.courseCode, fields.section, stableId);
-    const prior = seen.get(generated);
-    if (prior && prior !== stableId) throw new HttpError(409, "Pseudonym collision detected; crosswalk was not created");
-    seen.set(generated, stableId);
-    pseudonyms.push(generated);
-    outputRows.push([...parsed.headers.map((_, index) => row[index] ?? ""), generated]);
-  }
-  const database = getDatabase();
-  if (database) {
-    try {
-      const course = await database.query("SELECT id FROM courses WHERE id = $1", [fields.courseId]);
-      if (!course.rows[0]) throw new HttpError(404, "Course not found");
-      await withTransaction(database, async (client) => {
-        for (const value of pseudonyms) {
-          try {
-            await client.query(`INSERT INTO students (course_id, pseudonym) VALUES ($1, $2)
-              ON CONFLICT (course_id, pseudonym) DO NOTHING`, [fields.courseId, value]);
-          } catch (error) {
-            throw error;
-          }
-        }
-      });
-    } catch (error) {
-      throw error;
-    }
-  }
-  const lines = [[...parsed.headers, "Pseudonym"], ...outputRows]
-    .map((row) => row.map(csvCell).join(",")).join("\r\n");
-  const csv = Buffer.from(`\uFEFF${lines}\r\n`, "utf8");
-  if (fields.format === "csv") {
-    response.set({ "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": "attachment; filename=roster-crosswalk.csv" });
-    response.send(csv);
-    return;
-  }
+  const { courseId } = courseIdSchema.parse(request.body);
   try {
-    const envelope = await encryptCrosswalk(csv, passphrase!);
-    response.set({ "Content-Type": "application/json; charset=utf-8", "Content-Disposition": "attachment; filename=roster-crosswalk.cga.json" });
-    response.json(envelope);
-  } finally {
-    csv.fill(0);
+    const students = await persistRoster(courseId, request.file.buffer);
+    writeStructuredLog("info", "roster_import_completed", { courseId, imported: students.length });
+    response.status(201).json({ imported: students.length, students: sortByLabel(students) });
+  } catch (error) {
+    writeStructuredLog("error", "roster_import_rejected", {
+      courseId,
+      status: error instanceof HttpError ? error.status : 500
+    });
+    throw error;
   }
 });
 
-router.post("/crosswalk/unlock", unlockUpload.single("file"), async (request, response) => {
+router.get("/", async (request, response) => {
   response.set("Cache-Control", "no-store");
-  if (!request.file) throw new HttpError(400, "A multipart encrypted crosswalk file field named file is required");
-  const fields = unlockFieldsSchema.parse(request.body);
-  const envelope = parseEnvelope(request.file.buffer);
-  let plaintext: Buffer | undefined;
-  try {
-    plaintext = await decryptCrosswalk(envelope, fields.passphrase);
-    const mappings = readUnlockedMappings(plaintext);
-    response.json({ count: mappings.length, mappings });
-  } finally {
-    plaintext?.fill(0);
-  }
+  const { courseId } = courseIdSchema.parse(request.query);
+  const database = requireDatabase();
+  const students = await database.query(`SELECT id, pseudonym, display_name AS "name"
+    FROM students WHERE course_id = $1 ORDER BY display_name, pseudonym`, [courseId]);
+  response.json({ students: students.rows as RosterStudent[] });
 });
 
 export const rostersRouter = router;

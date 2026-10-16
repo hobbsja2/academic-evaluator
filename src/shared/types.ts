@@ -129,6 +129,17 @@ export interface AnnouncementDraft {
   announcement: string;
 }
 
+/**
+ * One imported roster row. `name` is the student's real name and is used for
+ * display and selection only; every request body and saved run carries the
+ * course-scoped `pseudonym` instead.
+ */
+export interface RosterStudent {
+  id: string;
+  pseudonym: string;
+  name: string | null;
+}
+
 export type GradingBackend = "ollama" | "claude";
 
 export interface GradeCriterionResult {

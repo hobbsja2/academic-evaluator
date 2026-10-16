@@ -1,6 +1,6 @@
 import { Pool, type PoolClient } from "@neondatabase/serverless";
 import { config } from "./config.js";
-import { HttpError } from "./errors.js";
+import { HttpError, describeErrorForLog } from "./errors.js";
 import { writeStructuredLog } from "./logger.js";
 
 export type Database = Pool;
@@ -19,8 +19,10 @@ export function getDatabase(): Database | null {
       idleTimeoutMillis: 20_000,
       connectionTimeoutMillis: 10_000
     });
-    pool.on("error", (error: Error) => {
-      writeStructuredLog("error", "database_pool_idle_error", { errorType: error.name });
+    // The value is typed Error but is not always one: the Neon driver re-emits a raw
+    // WebSocket Event here, which is why this line used to carry no usable cause.
+    pool.on("error", (error: unknown) => {
+      writeStructuredLog("error", "database_pool_idle_error", describeErrorForLog(error));
     });
   }
   return pool;

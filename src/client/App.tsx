@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type {
   AiUseAssessment, AttachmentFinding, AttachmentSnapshot, Course, GradeCriterionResult, NormalizedRubric,
-  StagedDiscussionSubmission
+  RosterStudent, StagedDiscussionSubmission
 } from "../shared/types";
 import { AiUsePanel, aiUseBand } from "./AiUsePanel";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
@@ -13,12 +13,11 @@ type Health = {
   database: { configured: boolean; connected: boolean };
   ollama: { available: boolean; model: string; modelAvailable: boolean };
   libreOffice: { available: boolean; version: string | null };
+  retention: { lastAttemptAt: string | null; lastSuccessAt: string | null; consecutiveFailures: number; lastErrorName: string | null };
 };
 type StoredRubric = NormalizedRubric & { id?: string; version?: number };
 type RubricList = { memory: NormalizedRubric[]; persisted: StoredRubric[] };
 type ActiveCourseSelection = Pick<Course, "id" | "code" | "section" | "title" | "term"> & { token: string };
-type Validation = { valid: boolean; rowCount: number; columnCount: number; headers: string[]; stableIdHeader: string };
-type CrosswalkMapping = { identityLabel: string; pseudonym: string };
 type Notice = { kind: "success" | "error" | "info"; text: string } | null;
 type HistoryRun = {
   id: string; createdAt: string; apaEnabled: boolean; model: string;
@@ -38,22 +37,25 @@ const emptyCourse: CourseForm = {
 function labelForRubric(rubric: NormalizedRubric): string {
   return rubric.rubricTitle || rubric.assignmentName || "Untitled rubric";
 }
+// A purge that keeps failing used to be visible only on the server's stderr.
+function retentionLabel(health: Health | null): string {
+  if (!health) return "Automatic purge status unknown";
+  const { consecutiveFailures, lastErrorName, lastAttemptAt } = health.retention;
+  if (consecutiveFailures > 0) {
+    return `Automatic purge failing (${consecutiveFailures}× ${lastErrorName ?? "unknown cause"})`;
+  }
+  // Without a database the purge never runs, so it has not earned "healthy".
+  return lastAttemptAt ? "Automatic purge healthy" : "Automatic purge idle";
+}
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(`${value}T00:00:00`));
 }
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.style.display = "none";
-  document.body.appendChild(link);
-  try {
-    link.click();
-  } finally {
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
+// Two students can share a name, so the pseudonym tail is appended to tell them
+// apart — and only then, to keep the common case readable.
+function studentOptionLabel(student: RosterStudent, students: RosterStudent[]): string {
+  if (!student.name) return student.pseudonym;
+  const repeated = students.filter((item) => item.name === student.name).length > 1;
+  return repeated ? `${student.name} (…${student.pseudonym.slice(-4)})` : student.name;
 }
 
 export default function App() {
@@ -67,13 +69,10 @@ export default function App() {
   const [rubricIndex, setRubricIndex] = useState("");
   const [assignmentDirections, setAssignmentDirections] = useState("");
   const [rosterFile, setRosterFile] = useState<File | null>(null);
-  const [validation, setValidation] = useState<Validation | null>(null);
-  const [crosswalkConfirmed, setCrosswalkConfirmed] = useState(false);
-  const [exportPassphrase, setExportPassphrase] = useState("");
-  const [exportPassphraseConfirmation, setExportPassphraseConfirmation] = useState("");
-  const [unlockFile, setUnlockFile] = useState<File | null>(null);
-  const [unlockPassphrase, setUnlockPassphrase] = useState("");
-  const [unlockedMappings, setUnlockedMappings] = useState<CrosswalkMapping[]>([]);
+  const [roster, setRoster] = useState<RosterStudent[]>([]);
+  // The global notice renders at the top of a 2700px page, far above the roster
+  // control, so every import outcome is also reported inside the roster panel.
+  const [rosterMessage, setRosterMessage] = useState<Notice>(null);
   const [documentName, setDocumentName] = useState("");
   const [submissionText, setSubmissionText] = useState("");
   const [pseudonym, setPseudonym] = useState("");
@@ -95,6 +94,8 @@ export default function App() {
   const [discussionReply, setDiscussionReply] = useState("");
 
   const selectedCourse = courses.find((course) => course.id === courseId);
+  // Display only. Every request body carries the pseudonym, never the name.
+  const studentLabel = roster.find((student) => student.pseudonym === pseudonym)?.name ?? pseudonym;
   const selectedRubric = rubricIndex === "" ? undefined : rubrics[Number(rubricIndex)];
   // Persisted rubrics carry the local assignment UUID; memory and fixture rubrics
   // carry a Canvas identifier instead, which attachments cannot key on.
@@ -130,14 +131,17 @@ export default function App() {
     setAssignmentDirections(selectedRubric?.assignmentDirections ?? "");
   }, [rubricIndex, selectedRubric?.assignmentDirections]);
 
+  // The single place the roster is fetched. Fires on mount and on every course change.
   useEffect(() => {
-    setUnlockedMappings([]);
-    setUnlockPassphrase("");
+    void loadRoster(selectedCourse?.id ?? "");
   }, [selectedCourse?.id]);
 
-  function showError(error: unknown) {
+  // Stable identity is required: child panels list onError in hook dependencies, and
+  // a new function on every render re-ran AnnouncementsPanel's reset effect, which
+  // wiped a freshly generated draft the moment the app re-rendered.
+  const showError = useCallback((error: unknown): void => {
     setNotice({ kind: "error", text: error instanceof Error ? error.message : "Unexpected error" });
-  }
+  }, []);
 
   async function loadCourseRubrics(targetCourseId: string) {
     try {
@@ -235,56 +239,52 @@ export default function App() {
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
-  async function validateRoster() {
-    if (!rosterFile) return;
-    setBusy("roster"); setValidation(null); setCrosswalkConfirmed(false);
-    const body = new FormData(); body.append("file", rosterFile);
+  async function loadRoster(targetCourseId: string): Promise<void> {
+    setRoster([]);
+    if (!targetCourseId) return;
     try {
-      setValidation(await api<Validation>("/api/rosters/validate", { method: "POST", body }));
-      setNotice({ kind: "success", text: "Roster structure is valid. Review the privacy warning before creating a crosswalk." });
-    } catch (error) { showError(error); } finally { setBusy(""); }
+      const params = new URLSearchParams({ courseId: targetCourseId });
+      const { students } = await api<{ students: RosterStudent[] }>(`/api/rosters?${params}`);
+      setRoster(students);
+    } catch (error) {
+      // Without a database there is no roster to load, and the rest of the app
+      // still works, so a 503 is not surfaced as an error.
+      if (error instanceof ApiError && error.status === 503) return;
+      showError(error);
+    }
   }
 
-  async function downloadCrosswalk(format: "encrypted" | "csv") {
-    if (!rosterFile || !selectedCourse) return;
-    if (format === "csv" && !crosswalkConfirmed) return;
-    if (format === "encrypted" && (exportPassphrase.length < 12 || exportPassphrase !== exportPassphraseConfirmation)) return;
-    setBusy(`crosswalk-${format}`);
+  // Every exit path sets rosterMessage. The two guards used to return silently,
+  // which is what made a click on Import roster look like nothing happened.
+  async function importRoster(): Promise<void> {
+    setNotice(null);
+    setRosterMessage(null);
+    if (!selectedCourse) {
+      setRosterMessage({ kind: "error", text: "Select a course first, then import its roster." });
+      return;
+    }
+    if (!rosterFile) {
+      setRosterMessage({ kind: "error", text: "Choose a roster CSV file first." });
+      return;
+    }
+    setBusy("roster");
     const body = new FormData();
-    body.append("file", rosterFile); body.append("courseId", selectedCourse.id);
-    body.append("courseCode", selectedCourse.code); body.append("section", selectedCourse.section);
-    body.append("format", format);
-    if (format === "encrypted") body.append("passphrase", exportPassphrase);
+    body.append("file", rosterFile);
+    body.append("courseId", selectedCourse.id);
     try {
-      const response = await fetch("/api/rosters/crosswalk", { method: "POST", body });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({})) as { error?: string };
-        throw new ApiError(response.status, payload.error || "Crosswalk could not be created.");
-      }
-      const encrypted = format === "encrypted";
-      downloadBlob(await response.blob(), encrypted ? "roster-crosswalk.cga.json" : "roster-crosswalk.csv");
-      setExportPassphrase("");
-      setExportPassphraseConfirmation("");
-      setNotice({
-        kind: "success",
-        text: encrypted
-          ? "Encrypted crosswalk downloaded. Keep its passphrase separately; it cannot be recovered."
-          : "Plaintext crosswalk downloaded. Store this identifiable CSV only in an approved secure location."
+      const response = await api<{ imported: number; students: RosterStudent[] }>(
+        "/api/rosters/import", { method: "POST", body });
+      setRoster(response.students);
+      const text = `${response.imported} students imported. Select a student in the grading section below.`;
+      setRosterMessage({ kind: "success", text });
+      setNotice({ kind: "success", text: `${response.imported} students imported.` });
+    } catch (error) {
+      setRosterMessage({
+        kind: "error",
+        text: `Roster import failed. ${error instanceof Error ? error.message : "Unexpected error"}`,
       });
-    } catch (error) { showError(error); } finally { setBusy(""); }
-  }
-
-  async function unlockCrosswalk() {
-    if (!unlockFile || unlockPassphrase.length < 12) return;
-    setBusy("unlock"); setUnlockedMappings([]);
-    const body = new FormData();
-    body.append("file", unlockFile); body.append("passphrase", unlockPassphrase);
-    try {
-      const unlocked = await api<{ count: number; mappings: CrosswalkMapping[] }>("/api/rosters/crosswalk/unlock", { method: "POST", body });
-      setUnlockedMappings(unlocked.mappings);
-      setUnlockPassphrase("");
-      setNotice({ kind: "success", text: `${unlocked.count} crosswalk mappings unlocked in memory for this course selection.` });
-    } catch (error) { showError(error); } finally { setBusy(""); }
+      showError(error);
+    } finally { setBusy(""); }
   }
 
   async function loadFixture() {
@@ -346,7 +346,7 @@ export default function App() {
     if (stagedDiscussion.assignmentDirections && !assignmentDirections.trim()) {
       setAssignmentDirections(stagedDiscussion.assignmentDirections);
     }
-    setNotice({ kind: "success", text: "Discussion capture loaded as the submission. Generate suggestions when ready; a pseudonym is only needed to save." });
+    setNotice({ kind: "success", text: "Discussion capture loaded as the submission. Generate suggestions when ready; a student is only needed to save." });
   }
 
   async function saveGradingPolicy() {
@@ -378,7 +378,7 @@ export default function App() {
       const params = new URLSearchParams({ courseId: selectedCourse.id, pseudonym: pseudonym.trim() });
       const response = await api<{ history: HistoryRun[] }>(`/api/grading/history?${params}`);
       setHistory(response.history);
-      setNotice({ kind: "info", text: response.history.length ? `Found ${response.history.length} saved grading run(s).` : "No saved grading runs found for this pseudonym." });
+      setNotice({ kind: "info", text: response.history.length ? `Found ${response.history.length} saved grading run(s).` : "No saved grading runs found for this student." });
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
@@ -404,6 +404,7 @@ export default function App() {
           rubric: rubricForGrading, submissionText, apaEnabled, context,
           assignmentId: attachmentAssignmentId,
           courseId: selectedCourse?.id ?? null,
+          pseudonym: pseudonym || null,
           backend: gradingBackend,
         }),
       );
@@ -441,7 +442,7 @@ export default function App() {
       );
       setResults(response.results);
       setGradingRunId(response.gradingRunId);
-      setNotice({ kind: "success", text: `Run saved for ${pseudonym.trim()}. Individual criteria can now be approved and saved.` });
+      setNotice({ kind: "success", text: `Run saved for ${studentLabel}. Individual criteria can now be approved and saved.` });
     } catch (error) { showError(error); } finally { setBusy(""); }
   }
 
@@ -496,6 +497,7 @@ export default function App() {
           <StatusDot ok={health?.database.connected} label={health?.database.connected ? "Database connected" : "Database unavailable"} />
           <StatusDot ok={health?.ollama.available && health.ollama.modelAvailable} label={health?.ollama.modelAvailable ? "Grader ready" : "Grader unavailable"} />
           <StatusDot ok={health?.libreOffice.available} label={health?.libreOffice.available ? "DOC extraction ready" : "DOC extraction unavailable"} />
+          <StatusDot ok={health ? health.retention.consecutiveFailures === 0 : undefined} label={retentionLabel(health)} />
         </div>
       </header>
 
@@ -594,40 +596,16 @@ export default function App() {
         </section>
 
         <section className="panel" aria-labelledby="roster-heading">
-          <div className="section-heading"><div><span className="step">2</span><h2 id="roster-heading">Pseudonym roster</h2></div><p>Validate a roster, export an encrypted crosswalk, or unlock one temporarily in memory.</p></div>
+          <div className="section-heading"><div><span className="step">2</span><h2 id="roster-heading">Course roster</h2></div><p>Import the Canvas roster CSV once so students can be selected by name when grading.</p></div>
           <label htmlFor="roster-file">Canvas roster CSV</label>
-          <input id="roster-file" type="file" accept=".csv,text/csv" onChange={(event) => { setRosterFile(event.target.files?.[0] || null); setValidation(null); setCrosswalkConfirmed(false); }} />
-          <button type="button" className="secondary" disabled={!rosterFile || busy === "roster"} onClick={() => void validateRoster()}>{busy === "roster" ? "Validating…" : "Validate roster"}</button>
-          {validation && <div className="validation-card"><strong>{validation.rowCount} student rows ready</strong><span>{validation.columnCount} columns · Stable ID: {validation.stableIdHeader}</span>
-            <div className="encrypted-export">
-              <div><strong>Recommended: encrypted crosswalk</strong><p>The complete identifiable CSV is encrypted before download. The passphrase is used only for this export, is never stored, and cannot be recovered.</p></div>
-              <div className="form-grid">
-                <div><label htmlFor="export-passphrase">Encryption passphrase</label><input id="export-passphrase" type="password" autoComplete="off" minLength={12} maxLength={256} value={exportPassphrase} onChange={(event) => setExportPassphrase(event.target.value)} aria-describedby="export-passphrase-help" /></div>
-                <div><label htmlFor="export-passphrase-confirmation">Confirm passphrase</label><input id="export-passphrase-confirmation" type="password" autoComplete="off" minLength={12} maxLength={256} value={exportPassphraseConfirmation} onChange={(event) => setExportPassphraseConfirmation(event.target.value)} /></div>
-              </div>
-              <small id="export-passphrase-help">Use 12–256 characters and keep it separately from the encrypted file.</small>
-              {exportPassphraseConfirmation && exportPassphrase !== exportPassphraseConfirmation && <small className="field-error" role="alert">Passphrases do not match.</small>}
-              <button type="button" disabled={!selectedCourse || exportPassphrase.length < 12 || exportPassphrase !== exportPassphraseConfirmation || busy === "crosswalk-encrypted"} onClick={() => void downloadCrosswalk("encrypted")}>{busy === "crosswalk-encrypted" ? "Encrypting…" : "Create and download encrypted crosswalk"}</button>
-              {!selectedCourse && <small>Select a course before creating the crosswalk.</small>}
-            </div>
-            <details className="plaintext-fallback">
-              <summary>Plaintext CSV fallback (higher risk)</summary>
-              <div className="privacy-warning"><strong>Identifiable data warning</strong><p>This fallback downloads student identities and pseudonyms without encryption. Store it only in an approved secure location and never upload it with submissions.</p>
-                <label className="check-row"><input type="checkbox" checked={crosswalkConfirmed} onChange={(event) => setCrosswalkConfirmed(event.target.checked)} />I understand this CSV contains identifiable student data.</label>
-              </div>
-              <button type="button" className="secondary" disabled={!selectedCourse || !crosswalkConfirmed || busy === "crosswalk-csv"} onClick={() => void downloadCrosswalk("csv")}>{busy === "crosswalk-csv" ? "Creating…" : "Create and download plaintext CSV"}</button>
-            </details>
-          </div>}
-          <div className="unlock-card">
-            <h3>Unlock encrypted crosswalk</h3>
-            <p>Choose an encrypted crosswalk and enter its passphrase. Identity labels and pseudonyms are returned only to this page's React memory; they are not stored in browser storage or Neon.</p>
-            <div className="form-grid">
-              <div><label htmlFor="unlock-file">Encrypted crosswalk file</label><input id="unlock-file" type="file" accept=".json,application/json" onChange={(event) => { setUnlockFile(event.target.files?.[0] || null); setUnlockedMappings([]); }} /></div>
-              <div><label htmlFor="unlock-passphrase">Passphrase</label><input id="unlock-passphrase" type="password" autoComplete="off" minLength={12} maxLength={256} value={unlockPassphrase} onChange={(event) => setUnlockPassphrase(event.target.value)} /></div>
-            </div>
-            <button type="button" className="secondary" disabled={!unlockFile || unlockPassphrase.length < 12 || busy === "unlock"} onClick={() => void unlockCrosswalk()}>{busy === "unlock" ? "Unlocking…" : "Unlock in memory"}</button>
-            {unlockedMappings.length > 0 && <small role="status">{unlockedMappings.length} mappings are available only until this page reloads or the selected course changes.</small>}
-          </div>
+          <input id="roster-file" type="file" accept=".csv,text/csv" onChange={(event) => { setRosterFile(event.target.files?.[0] || null); setRosterMessage(null); }} />
+          {/* Deliberately enabled even when a prerequisite is missing: a disabled button
+              cannot tell the user why the click did nothing. importRoster() reports the
+              specific reason instead. */}
+          <button type="button" className="secondary" disabled={busy === "roster"} onClick={() => void importRoster()}>{busy === "roster" ? "Importing…" : "Import roster"}</button>
+          {rosterMessage && <small className={rosterMessage.kind === "error" ? "field-error" : undefined} role={rosterMessage.kind === "error" ? "alert" : "status"}>{rosterMessage.text}</small>}
+          {!selectedCourse && <small>Select a course before importing a roster.</small>}
+          {roster.length > 0 && <small role="status">{roster.length} student(s) in this course's roster.</small>}
         </section>
         <section className="panel" aria-labelledby="rubric-heading">
           <div className="section-heading"><div><span className="step">3</span><h2 id="rubric-heading">Rubric and submission</h2></div><p>Choose the evaluation standard and extract a supported document locally.</p></div>
@@ -703,12 +681,20 @@ export default function App() {
         />
 
         <section className="panel" aria-labelledby="grade-heading">
-          <div className="section-heading"><div><span className="step">5</span><h2 id="grade-heading">Generate suggestions</h2></div><p>Set the APA policy and review every result before use. A pseudonym is only needed to save a run.</p></div>
+          <div className="section-heading"><div><span className="step">5</span><h2 id="grade-heading">Generate suggestions</h2></div><p>Set the APA policy and review every result before use. A student is only needed to save a run.</p></div>
           <p className="scoring-note"><strong>Flexible scoring:</strong> Rubric rating points are anchors, not exclusive values. Suggested and professor-approved points may fall between anchors, from zero through each criterion maximum.</p>
           <div className="grade-controls">
             <div>
-              {unlockedMappings.length > 0 && <><label htmlFor="identity-selector">Unlocked identity (memory only)</label><select id="identity-selector" value={unlockedMappings.some((mapping) => mapping.pseudonym === pseudonym) ? pseudonym : ""} onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }}><option value="">Choose an identity label</option>{unlockedMappings.map((mapping) => <option key={mapping.pseudonym} value={mapping.pseudonym}>{mapping.identityLabel}</option>)}</select><small>Identity labels stay only in memory. Selecting one fills the pseudonym below.</small></>}
-              <label htmlFor="pseudonym">Student pseudonym</label><input id="pseudonym" value={pseudonym} maxLength={120} placeholder="COURSE-SECTION-SXXXXXXXX" onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }} /><small>Optional. Leave this blank to generate suggestions without saving; you can supply a pseudonym afterwards to keep the run. Saving requires the pseudonym to exist in this course's imported roster.</small><button type="button" className="secondary history-button" disabled={!selectedCourse || !pseudonym.trim() || busy === "history"} onClick={() => void loadHistory()}>{busy === "history" ? "Searching…" : "Find saved records"}</button>
+              <label htmlFor="student-select">Student</label>
+              <select id="student-select" value={pseudonym} disabled={roster.length === 0}
+                onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }}>
+                <option value="">No student selected</option>
+                {roster.map((student) => <option key={student.pseudonym} value={student.pseudonym}>{studentOptionLabel(student, roster)}</option>)}
+              </select>
+              <small>{roster.length === 0
+                ? "Import this course's roster in step 2 to select a student."
+                : "Only needed to save a run. Suggestions can be generated without selecting anyone."}</small>
+              <button type="button" className="secondary history-button" disabled={!selectedCourse || !pseudonym.trim() || busy === "history"} onClick={() => void loadHistory()}>{busy === "history" ? "Searching…" : "Find saved records"}</button>
             </div>
             <fieldset><legend>APA evaluation</legend><label className="switch-row"><input type="checkbox" checked={apaEnabled} onChange={(event) => setApaEnabled(event.target.checked)} /><span>Evaluate APA requirements</span></label><p className={apaEnabled ? "enabled-note" : "disabled-note"}>{apaEnabled ? "Enabled: APA applies only where the rubric explicitly supports it." : "Disabled: the grader must not deduct points, lower ratings, criticize, or mention APA."}</p></fieldset>
             <fieldset><legend>Grading backend</legend><label className="switch-row"><input type="radio" name="gradingBackend" value="ollama" checked={gradingBackend === "ollama"} onChange={() => setGradingBackend("ollama")} /><span>Local Ollama</span></label><label className="switch-row"><input type="radio" name="gradingBackend" value="claude" checked={gradingBackend === "claude"} onChange={() => setGradingBackend("claude")} /><span>Claude Haiku (cloud)</span></label><p className={gradingBackend === "claude" ? "enabled-note" : "disabled-note"}>{gradingBackend === "claude" ? "Cloud: grading sent to Anthropic. Requires ANTHROPIC_API_KEY in server .env." : "Local: all grading runs on your machine via Ollama. No data leaves."}</p></fieldset>
@@ -716,7 +702,7 @@ export default function App() {
           <button className="primary large" type="button" disabled={!selectedRubric || !submissionText || busy === "grading"} onClick={() => void gradeSubmission()}>{busy === "grading" ? (gradingBackend === "claude" ? "Grading with Claude…" : "Grading locally…") : "Generate grading suggestions"}</button>
           {(!selectedRubric || !submissionText) && <small>Choose a rubric and extract a document to continue.</small>}
           {history.length > 0 && <div className="history-list" aria-label="Saved grading records">
-            <h3>Saved records for {pseudonym}</h3>
+            <h3>Saved records for {studentLabel}</h3>
             {history.map((run) => <details key={run.id}>
               <summary><strong>{run.assignmentName}</strong><span>{new Date(run.createdAt).toLocaleString()} · {run.results.reduce((sum, item) => sum + item.approvedPoints, 0)} approved points{run.aiUseScore !== null && ` · AI use ${run.aiUseScore}/10 (${aiUseBand(run.aiUseScore).label.toLowerCase()})`}</span></summary>
               <div>{run.results.map((item, index) => <div className="history-result" key={`${run.id}-${index}`}><strong>{item.criterionName || `Criterion ${index + 1}`}: {item.approvedRating} · {item.approvedPoints}</strong><p>{item.approvedExplanation}</p></div>)}</div>
@@ -749,15 +735,13 @@ export default function App() {
             <p>Optional. Suggestions below are in memory only until saved.</p>
           </div>
           {selectedRubric?.id ? <>
-            <label htmlFor="save-run-pseudonym">Student pseudonym</label>
-            <input id="save-run-pseudonym" value={pseudonym} maxLength={120} placeholder="COURSE-SECTION-SXXXXXXXX"
-              onChange={(event) => { setPseudonym(event.target.value); setHistory([]); }} />
-            <small>Must already exist in this course's imported roster. Saving also unlocks per-criterion approval below.</small>
+            <p>Student: {pseudonym ? studentLabel : "none selected"}</p>
+            {!pseudonym && <small>Select a student from the course roster before saving this run.</small>}
             <div className="button-row">
               <button className="primary" type="button"
-                disabled={!selectedCourse || !pseudonym.trim() || busy === "save-run"}
+                disabled={!selectedCourse || !pseudonym || busy === "save-run"}
                 onClick={() => void saveRun()}>
-                {busy === "save-run" ? "Saving…" : "Save run for this pseudonym"}
+                {busy === "save-run" ? "Saving…" : "Save run for this student"}
               </button>
             </div>
           </> : <p className="warning-text">This run used a fixture or unsaved rubric, so it cannot be persisted. Capture the rubric from Canvas to enable saving.</p>}
@@ -884,7 +868,7 @@ const ResultCard = React.memo(function ResultCard({
             {isSaving ? "Saving…" : "Save approved edits"}
           </button>
         </div>
-        {!result.resultId && <small>Not saved yet. Use <strong>Keep this run</strong> above to store it against a pseudonym; approved edits can then be saved without regrading.</small>}
+        {!result.resultId && <small>Not saved yet. Use <strong>Keep this run</strong> above to store it against a student; approved edits can then be saved without regrading.</small>}
       </div>
     </article>
   );
